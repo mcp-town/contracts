@@ -1,4 +1,4 @@
-pragma solidity ^0.4.24;
+pragma solidity 0.4.24;
 
 import "./Manageable.sol";
 
@@ -20,7 +20,7 @@ contract Influence is Manageable {
         address owner;
         int256 influence;
         int256 oldInfluence;
-        uint8[8] types;
+        uint256 types;
         uint16[] regionIdsNear;
     }
 
@@ -371,18 +371,17 @@ contract Influence is Manageable {
             _updateRegionIds(x, y);
 
         }
-        uint8[8] storage types = influenceMap[x][y].types;
 
         if(typeId > 0) {
-            types[typeId - 1] = demolition ? types[typeId - 1] - 1 :types[typeId - 1] + 1;
+            influenceMap[x][y].types = demolition ? getDecType(typeId, influenceMap[x][y].types) : getIncType(typeId, influenceMap[x][y].types);
         }
 
 
         InfluenceSideEffect[] storage sideEffects = influenceSideEffect[influenceMap[x][y].typeId];
 
         for(uint256 i = 0; i < sideEffects.length; i++) {
-            if(types[sideEffects[i].typeId - 1] > 0) {
-                total = total + getSideEffectValue(types, sideEffects[i]);
+            if( getType(sideEffects[i].typeId, influenceMap[x][y].types) > 0) {
+                total = total + getSideEffectValue(influenceMap[x][y].types, sideEffects[i]);
             }
         }
 
@@ -394,20 +393,21 @@ contract Influence is Manageable {
         }
     }
 
-    function getSideEffectValue(uint8[8] memory types, InfluenceSideEffect sideEffect) internal pure returns (int256) {
+    function getSideEffectValue(uint256 types, InfluenceSideEffect sideEffect) internal pure returns (int256) {
+        uint8 typeCount = getType(sideEffect.typeId, types);
         if(sideEffect.startFrom == 0) {
             return sideEffect.value * (sideEffect.penalty ? -1 : int8(1))
-                * (sideEffect.numberAffects < types[sideEffect.typeId - 1]
+                * (sideEffect.numberAffects < typeCount
                     ? sideEffect.numberAffects
-                    : types[sideEffect.typeId - 1]);
+                    : typeCount);
         }
 
         return sideEffect.value * (sideEffect.penalty ? -1 : int8(1))
-            * (sideEffect.startFrom < types[sideEffect.typeId - 1]
+            * (sideEffect.startFrom < typeCount
                 ? (
-                    types[sideEffect.typeId - 1] - sideEffect.startFrom > int(sideEffect.numberAffects)
+                    typeCount - sideEffect.startFrom > int(sideEffect.numberAffects)
                         ? sideEffect.numberAffects
-                        : types[sideEffect.typeId - 1] - sideEffect.startFrom
+                        : typeCount - sideEffect.startFrom
                 ) : 0
             );
     }
@@ -440,14 +440,14 @@ contract Influence is Manageable {
         _updateTotalInfluence(totalInflueceChange);
     }
 
-    function _getTypes(int256 x, int256 y) internal view returns (uint8[8] types) {
+    function _getTypes(int256 x, int256 y) internal view returns (uint256 types) {
         for(int256 xi = x-5; xi <= x+5; xi++) {
             for(int256 yi = y-5; yi <= y+5; yi++) {
                 if(xi == x && yi == y) {
                     continue;
                 }
                 if(influenceMap[xi][yi].typeId > 0) {
-                    types[influenceMap[xi][yi].typeId - 1]++;
+                    types = getIncType(influenceMap[xi][yi].typeId, types);
                 }
             }
         }
@@ -474,7 +474,7 @@ contract Influence is Manageable {
         _updateInfluenceNearCell(x, y, typeId, false);
     }
 
-    function getTypes(int256 x, int256 y) public view returns (uint8[8] types) {
+    function getTypes(int256 x, int256 y) public view returns (uint256 types) {
         return influenceMap[x][y].types;
     }
 
@@ -490,6 +490,39 @@ contract Influence is Manageable {
         }
     }
 
+    function _getTypeShift(uint8 typeId) pure internal returns (uint256){
+        return uint(typeId - 1) * 8;
+    }
+
+    function _clearType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
+        return currentTypes & ~_shiftLeft(0xFF, _getTypeShift(typeId));
+    }
+
+    function getUpdatedTypes(uint8 typeId, uint8 value, uint256 currentTypes) pure internal returns (uint256) {
+        return _clearType(typeId, currentTypes) | _shiftLeft(value, _getTypeShift(typeId));
+    }
+
+    function getIncType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
+        return _shiftLeft((getType(typeId, currentTypes) + 1),  _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
+    }
+
+    function getType(uint8 typeId, uint256 currentTypes) pure internal returns (uint8) {
+        uint256 shift = _getTypeShift(typeId);
+        return uint8(_shiftRight(currentTypes & _shiftLeft(0xFF, shift), shift));
+    }
+
+    function getDecType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
+        return _shiftLeft((getType(typeId, currentTypes) - 1), _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
+    }
+
+    function _shiftLeft(uint value, uint shift) pure internal returns (uint256) {
+        return value * (2 ** shift);
+    }
+
+    function _shiftRight(uint value, uint shift) pure internal returns (uint256) {
+        return value / (2 ** shift);
+    }
+
 //TODO: change to internal
     function currentPeriod() public view returns(uint256) {
         return now / period;
@@ -497,6 +530,16 @@ contract Influence is Manageable {
 
     function getCellInfluence(int256 x, int256 y) public view returns (int256) {
         return influenceMap[x][y].influence;
+    }
+
+    function getTypesNear(int256 x, int256 y) public view returns (uint8[8] types) {
+        for(uint8 i = 0; i < 8; i++) {
+            types[i] = getType(i + 1, influenceMap[x][y].types);
+        }
+    }
+
+    function getPureTypesNear(int256 x, int256 y) public view returns (uint256) {
+        return influenceMap[x][y].types;
     }
 
     function ecrecovery(bytes32 hash, bytes sig) internal pure returns (address) {

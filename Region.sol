@@ -35,6 +35,9 @@ contract Region is Manageable, Auction {
 
     constructor(address userBalanceAddress) public {
         userBalanceContract = UserBalance(userBalanceAddress);
+    }
+
+    function init() public onlyManager {
         isRegularAuctionAllowed = true;
     }
 
@@ -70,7 +73,7 @@ contract Region is Manageable, Auction {
 
         regionMap[regionId] = tokens.length - 1;
 
-        emit RegionChanged(tokens.length - 1, owner, regionName, tax, regionId, owner != address(0));
+        emit RegionChanged(regionMap[regionId], owner, regionName, tax, regionId, tokens[regionMap[regionId]].isCanSale);
     }
 
     function setOnRegularAuction(
@@ -161,6 +164,10 @@ contract Region is Manageable, Auction {
 
     function _transferEther(uint256 value) internal {
         address(mainContract).transfer(value);
+    }
+
+    function _addToBalance(address _to, uint256 _value, uint8 _reason) internal {
+        userBalanceContract.addBalance(_to, _value, _reason);
     }
 
     event RegionChanged(uint256 tokenId, address owner, string regionName, uint8 tax, uint16 regionId, bool isCanSale);

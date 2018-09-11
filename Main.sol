@@ -55,6 +55,7 @@ contract Main is Manageable, MainInterface {
     function init() public onlyManager {
         landContract.init();
         influenceContract.init();
+        regionContract.init();
     }
 
     function addBuildingType(uint8 typeId, uint256[7] price) public onlyManager {
@@ -82,11 +83,12 @@ contract Main is Manageable, MainInterface {
     }
 
     function getLandPrice(int256 x, int256 y) public view returns (uint256) {
-        if (!landContract.canBuy(x, y)) {
+        uint16 region = landContract.getRegion(x, y);
+
+        if (!landContract.canBuy(x, y) || !regionContract.canSaleLands(region)) {
             return 0;
         }
 
-        uint16 region = landContract.getRegion(x, y);
 
         (uint256 landValue, uint8 tokensBought) = landContract.getPrice(x, y);
 
@@ -108,9 +110,7 @@ contract Main is Manageable, MainInterface {
         uint256 royaltyValue = basePrice + (tokensBought ** 2) * royalty;
         uint256 taxValue = regionContract.getTaxValue(region, tokensBought, basePrice, royalty);
 
-
         uint256 totalValue = landValue + royaltyValue + taxValue;
-
 
         require(totalValue > 0 && msg.value >= totalValue, "Value is not enough");
 
