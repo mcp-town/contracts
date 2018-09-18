@@ -4,7 +4,7 @@ import './Manageable.sol';
 
 contract Auction is Manageable {
 
-    enum AuctionTypes {REGULAR, STEP}
+    enum AuctionTypes {REGULAR, STEP, FIXED}
 
     struct AuctionItem {
         address buyer;
@@ -23,10 +23,14 @@ contract Auction is Manageable {
 
     uint32 public auctionDuration = 7 days;
     uint32 public auctionStepInterval = 1 hours;
-    uint32 public auctionFeePart = 0.03*1e6; // 3%
+    uint32 public auctionFeePart = 0.025*1e6; // 3%
+    uint32 public regionSharePart = 0.05*1e6; // 5%
 
     bool public isStepAuctionAllowed = false;
     bool public isRegularAuctionAllowed = false;
+    bool public isFixedAuctionAllowed = false;
+
+    bool public isRegionShareEnabled = true;
 
     modifier onlyAuctionWinner(uint256 subjectId) {
         require(activeAuctions[subjectId].activeTill < now && activeAuctions[subjectId].buyer == msg.sender);
@@ -34,12 +38,12 @@ contract Auction is Manageable {
     }
 
     modifier notOnAuction(uint256 subjectId) {
-        require(activeAuctions[subjectId].activeTill == 0);
+        require(activeAuctions[subjectId].startPrice == 0);
         _;
     }
 
     function isOnAuction(uint256 subjectId) internal view returns (bool) {
-        return activeAuctions[subjectId].activeTill != 0;
+        return activeAuctions[subjectId].startPrice != 0;
     }
 
     function setAuctionDuration(uint32 duration) public onlyManager {
@@ -53,9 +57,9 @@ contract Auction is Manageable {
     }
 
 
-    function _setOnRegularAuction(uint256 subjectId, uint256 startPrice, uint256 minimalRaise, address seller) internal {
+    function _setOnRegularAuction(uint256 subjectId, uint256 startPrice, uint256 minimalRaise, address seller) internal notOnAuction(subjectId) {
         require(isRegularAuctionAllowed);
-        require(activeAuctions[subjectId].activeTill == 0);
+        require(startPrice > 0);
 
         AuctionItem storage newAuction = activeAuctions[subjectId];
         newAuction.startPrice = startPrice;
@@ -67,9 +71,9 @@ contract Auction is Manageable {
         emit AuctionRegularStart(subjectId, startPrice, newAuction.activeTill);
     }
 
-    function _setOnStepAuction(uint256 subjectId, uint256 startPrice, uint256 endPrice, address seller, uint32 duration) internal {
+    function _setOnStepAuction(uint256 subjectId, uint256 startPrice, uint256 endPrice, address seller, uint32 duration) internal notOnAuction(subjectId) {
         require(isStepAuctionAllowed);
-        require(activeAuctions[subjectId].activeTill == 0);
+        require(startPrice > 0);
         require(duration >= 1 days && duration <= 90 days);
 
         AuctionItem storage newAuction = activeAuctions[subjectId];
@@ -80,6 +84,20 @@ contract Auction is Manageable {
         newAuction.started = now;
         newAuction.seller = seller;
         emit AuctionStepStart(subjectId, startPrice, endPrice, newAuction.started, newAuction.activeTill);
+    }
+
+    function _setOnFixedAuction(uint256 subjectId, uint256 startPrice, address seller) internal notOnAuction(subjectId) {
+        require(isStepAuctionAllowed);
+        require(startPrice > 0);
+
+        AuctionItem storage newAuction = activeAuctions[subjectId];
+        newAuction.startPrice = startPrice;
+        newAuction.endPrice = startPrice;
+        newAuction.auctionType = AuctionTypes.FIXED;
+        newAuction.activeTill = 0;
+        newAuction.started = now;
+        newAuction.seller = seller;
+        emit AuctionFixedStart(subjectId, startPrice);
     }
 
     function _makeAuctionBid(uint256 subjectId) public payable {
@@ -108,7 +126,31 @@ contract Auction is Manageable {
             _transfer(oldOwner, msg.sender, subjectId);
 
             if(oldOwner != address(0)) {
-                _addToBalance(oldOwner, minimalBid - getFee(minimalBid), 3);
+                _addToBalance(oldOwner, minimalBid - getFee(minimalBid) - getRegionFee(minimalBid), 3);
+            }
+
+            if(minimalBid > msg.value) {
+                _addToBalance(msg.sender, msg.value - minimalBid, 3);
+            }
+
+            if(isRegionShareEnabled) {
+                _toRegionShareBank(subjectId, getRegionFee(minimalBid));
+            }
+
+            emit AuctionWon(subjectId, minimalBid);
+            _transferEther(minimalBid);
+        } else if(activeAuctions[subjectId].auctionType == AuctionTypes.FIXED) {
+            oldOwner = activeAuctions[subjectId].seller;
+
+            delete activeAuctions[subjectId];
+            _transfer(oldOwner, msg.sender, subjectId);
+
+            if(oldOwner != address(0)) {
+                _addToBalance(oldOwner, minimalBid - getFee(minimalBid) - getRegionFee(minimalBid), 3);
+            }
+
+            if(isRegionShareEnabled) {
+                _toRegionShareBank(subjectId, getRegionFee(minimalBid));
             }
 
             if(minimalBid > msg.value) {
@@ -116,12 +158,11 @@ contract Auction is Manageable {
             }
 
             emit AuctionWon(subjectId, minimalBid);
-            _transferEther(msg.value);
+            _transferEther(minimalBid);
+
         } else {
             msg.sender.transfer(msg.value);
         }
-
-
     }
 
     function getMinimalBid(uint256 subjectId) public view returns (uint256){
@@ -143,6 +184,8 @@ contract Auction is Manageable {
             return activeAuctions[subjectId].startPrice > activeAuctions[subjectId].endPrice
             ? activeAuctions[subjectId].startPrice - stepPrice * (allSteps - leftSteps)
             : activeAuctions[subjectId].startPrice + stepPrice * (allSteps - leftSteps);
+        } else if(activeAuctions[subjectId].auctionType == AuctionTypes.FIXED) {
+            return activeAuctions[subjectId].startPrice;
         }
 
         return 0;
@@ -157,7 +200,9 @@ contract Auction is Manageable {
 
         _transfer(seller, buyer, subjectId);
         if(address(0) != seller) {
-            _addToBalance(seller, value - getFee(value), 3);
+            _addToBalance(seller, value - getFee(value) - getRegionFee(value), 3);
+        } else if(isRegionShareEnabled) {
+            _toRegionShareBank(subjectId, getRegionFee(value));
         }
         emit AuctionWon(subjectId, value);
 
@@ -183,11 +228,16 @@ contract Auction is Manageable {
         emit AuctionCanceled(subjectId);
     }
 
-    function getFee(uint256 value) public view returns (uint256) {
+    function getFee(uint256 value) internal view returns (uint256) {
         return (value * auctionFeePart) / 1e6;
     }
 
+    function getRegionFee(uint256 value) internal view returns (uint256) {
+        return isRegionShareEnabled ? value * regionSharePart : 0;
+    }
+
     function _addToBalance(address _to, uint256 _value, uint8 _reason) internal;
+    function _toRegionShareBank(uint256 _tokenId, uint256 _value) internal;
     function _transfer(address _from, address _to, uint256 _tokenId) internal;
     function _transferEther(uint256 value) internal;
 
@@ -196,6 +246,7 @@ contract Auction is Manageable {
     event AuctionBid(uint256 indexed subjectId, address buyer, uint256 activeTill, uint256 bid);
     event AuctionWon(uint256 indexed subjectId, uint256 bid);
     event AuctionRegularStart(uint256 indexed subjectId, uint256 startPrice, uint256 activeTill);
+    event AuctionFixedStart(uint256 indexed subjectId, uint256 startPrice);
     event AuctionStepStart(uint256 indexed subjectId, uint256 startPrice, uint256 endPrice, uint256 started, uint256 activeTill);
     event AuctionCanceled(uint256 indexed subjectId);
 }

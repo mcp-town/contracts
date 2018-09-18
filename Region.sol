@@ -166,6 +166,11 @@ contract Region is Manageable, Auction {
         address(mainContract).transfer(value);
     }
 
+    function _toRegionShareBank(uint256 _tokenId, uint256 _value) internal {
+        mainContract.addToRegionShareBank(tokens[_tokenId].regionId, _value);
+    }
+
+
     function _addToBalance(address _to, uint256 _value, uint8 _reason) internal {
         userBalanceContract.addBalance(_to, _value, _reason);
     }

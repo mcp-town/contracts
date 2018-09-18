@@ -21,7 +21,7 @@ contract UserBalance is Manageable {
 
         userBalance[user] += value;
         totalBalance += value;
-        
+
         userJournal[user].push(Journal({
             value: value,
             charge: true,
@@ -54,16 +54,9 @@ contract UserBalance is Manageable {
         return userBalance[user];
     }
 
-    function userWithdrawal(uint256 value, address user) external onlyManager returns (uint256) {
-        require(
-            userBalance[user] >= value && address(this).balance >= value,
-            "Insufficient balance"
-        );
-
+    function userWithdrawal(uint256 value, address user) external onlyManager {
         decBalance(user, value, 3);
         emit UserWithdrawalDone(msg.sender, value);
-
-        return value;
     }
 
     function getLog20(
