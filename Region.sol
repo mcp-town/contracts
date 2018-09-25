@@ -1,4 +1,4 @@
-pragma solidity 0.4.24;
+pragma solidity 0.4.25;
 
 import "./Manageable.sol";
 import "./UserBalance.sol";
@@ -39,6 +39,15 @@ contract Region is Manageable, Auction {
 
     function init() public onlyManager {
         isRegularAuctionAllowed = true;
+        isFixedAuctionAllowed = true;
+
+        tokens.push(RegionToken({
+            regionId: 0,
+            owner: address(0),
+            tax: 0,
+            regionName: "",
+            isCanSale: false
+        }));
     }
 
     function getTaxValue(
@@ -65,13 +74,15 @@ contract Region is Manageable, Auction {
     function createRegion(uint16 regionId, address owner, string regionName, uint8 tax) public onlyManager {
         tokens.push(RegionToken({
             regionId: regionId,
-            owner: owner,
+            owner: address(0),
             tax: tax,
             regionName: regionName,
             isCanSale: owner != address(0)
         }));
 
         regionMap[regionId] = tokens.length - 1;
+
+        _transfer(address(0), owner, tokens.length - 1);
 
         emit RegionChanged(regionMap[regionId], owner, regionName, tax, regionId, tokens[regionMap[regionId]].isCanSale);
     }
@@ -82,14 +93,37 @@ contract Region is Manageable, Auction {
         _setOnRegularAuction(regionMap[regionId], startPrice, minimalRaise, msg.sender);
     }
 
+    function transferRegularAuction(
+        uint256 subjectId, uint256 startPrice, uint256 minimalRaise, uint256 activeTill, address buyer, uint256 currentBid, uint32 bidCount
+    ) public onlyManager notOnAuction(subjectId) {
+        require(tokens[subjectId].owner == address(0));
+
+        AuctionItem storage newAuction = activeAuctions[subjectId];
+        newAuction.startPrice = startPrice;
+        newAuction.auctionType = AuctionTypes.REGULAR;
+        newAuction.minimalRaise = minimalRaise;
+        newAuction.activeTill = activeTill;
+        newAuction.buyer = buyer;
+        newAuction.bid = currentBid;
+        newAuction.bidCount = bidCount;
+        newAuction.started = now;
+        newAuction.seller = address(0);
+        emit AuctionRegularTransfer(subjectId, address(0), startPrice, newAuction.activeTill, buyer, currentBid, bidCount);
+    }
+
+
     function setOnAuctionByGameManager(
         uint16 regionId, uint256 startPrice, uint256 minimalRaise
     ) public onlyManager {
         uint256 tokenId = regionMap[regionId];
         require(tokens[tokenId].owner == address(0));
-        require(!isOnAuction(tokenId));
+        require(!_isOnAuction(tokenId));
 
         _setOnRegularAuction(tokenId, startPrice, minimalRaise, address(0));
+    }
+
+    function setOnFixedAuction(uint16 regionId, uint256 startPrice) public onlyTokenOwner(regionMap[regionId]) {
+        _setOnFixedAuction(regionMap[regionId], startPrice, msg.sender);
     }
 
     function setTax(uint16 _regionId, uint8 _tax) public onlyTokenOwner(regionMap[_regionId]) {
@@ -157,16 +191,18 @@ contract Region is Manageable, Auction {
 
         tokens[_tokenId].owner = _to;
         approved[_tokenId] = address(0);
-        balances[_from] -= 1;
+        if(_from != address(0)) {
+            balances[_from] -= 1;
+        }
         balances[_to] += 1;
         emit Transfer(_from, _to, _tokenId);
     }
 
-    function _transferEther(uint256 value) internal {
-        address(mainContract).transfer(value);
+    function _transferEther() internal {
+        address(mainContract).transfer(address(this).balance);
     }
 
-    function _toRegionShareBank(uint256 _tokenId, uint256 _value) internal {
+    function _toRegionShareBank(uint256 _tokenId, int256 _value) internal {
         mainContract.addToRegionShareBank(tokens[_tokenId].regionId, _value);
     }
 
@@ -175,6 +211,7 @@ contract Region is Manageable, Auction {
         userBalanceContract.addBalance(_to, _value, _reason);
     }
 
+    event AuctionRegularTransfer(uint256 indexed subjectId, address indexed seller, uint256 startPrice, uint256 activeTill, address indexed buyer, uint256 bid, uint256 bidCount);
     event RegionChanged(uint256 tokenId, address owner, string regionName, uint8 tax, uint16 regionId, bool isCanSale);
     event RegionOpen(uint16 regionId);
     event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);

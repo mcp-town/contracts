@@ -1,4 +1,4 @@
-pragma solidity 0.4.24;
+pragma solidity 0.4.25;
 
 import "./Manageable.sol";
 import "./Land.sol";
@@ -70,10 +70,10 @@ contract Main is Manageable, MainInterface {
         canBeHuge[buildingId] = isCanBeHuge;
     }
 
-    // function addToGlobalShareBank() public payable {
-    //     require(msg.value > 0);
-    //     influenceContract.addGlobalShareBank(msg.value);
-    // }
+    function addToGlobalShareBank() public payable {
+        require(msg.value > 0);
+        influenceContract.addGlobalShareBank(int(msg.value));
+    }
 
     function addRequirement(
         uint8 typeId, uint8 level, uint8[] count,
@@ -129,20 +129,17 @@ contract Main is Manageable, MainInterface {
 
         if(msg.value - totalValue > 0) {
             userBalanceContract.addBalance(msg.sender, msg.value - totalValue, 2);
+            emit OperationChange(msg.sender, msg.value - totalValue);
         }
 
         emit LandBuy(tokenId, x, y, totalValue);
-    }
-
-    function influencePayoutSigned(uint256 period, uint256 value, bytes influenceSignature) public {
-        uint256 payoutValue = influenceContract.convertToBalanceValueSigned(msg.sender, influenceSignature, value, period);
-        userBalanceContract.addBalance(msg.sender, payoutValue, 4);
     }
 
     function influencePayout(uint16[] regionIds) public {
         int256 payoutValue = influenceContract.convertToBalanceValue(msg.sender, regionIds);
         if(payoutValue > 0){
             userBalanceContract.addBalance(msg.sender, uint(payoutValue), 4);
+            emit InfluencePayout(msg.sender, uint(payoutValue));
         }
     }
 
@@ -236,13 +233,14 @@ contract Main is Manageable, MainInterface {
         require(buildingPrice > 0 && buildingPrice <= msg.value);
         require(checkRequirements(x, y, buildingId, 1), "Requirements not satisfied");
 
-        buildAndCalculateInfluences(x, y, buildingId, 1, buildingPrice);
+        uint32 seed = buildAndCalculateInfluences(x, y, buildingId, 1, buildingPrice);
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
+            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
 
-        emit Builded(x, y, buildingId, 1);
+        emit Builded(x, y, buildingId, 1, seed);
     }
 
     function upgrade(int256 x, int256 y) public payable onlyLandOwner(x, y) {
@@ -259,9 +257,10 @@ contract Main is Manageable, MainInterface {
         buildAndCalculateInfluences(x, y, buildingId, buildingLevel + 1, buildingPrice);
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
+            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
 
-        emit Builded(x, y, buildingId, buildingLevel + 1);
+        emit Builded(x, y, buildingId, buildingLevel + 1, 0);
     }
 
     function upgradeToHuge(int256[2] x, int256[2] y) public payable {
@@ -272,8 +271,8 @@ contract Main is Manageable, MainInterface {
         uint256 buildingPrice = getBuildPrice(x[0], y[0], buildingId, 6);
         require(msg.value >= buildingPrice);
 
-        (int256 xr, int256 yr) = landContract.mergeToken2x(x, y, msg.sender);
-        (address owner, uint16 regionId) = landContract.build(xr, yr, buildingId, buildingLevel, buildings[buildingId]);
+        (uint8 master, uint8 orientation) = landContract.mergeToken2x(x, y, msg.sender);
+        (address owner, uint16 regionId,) = landContract.build(x[master], y[master], buildingId, buildingLevel, buildings[buildingId]);
 
         influenceContract.addRegionShareBank(
             int(buildingTypes[buildings[buildingId]].price[6] * regionBankTax / 100),
@@ -285,6 +284,7 @@ contract Main is Manageable, MainInterface {
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
+            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
 
         influenceContract.setType(x[0], y[0], buildings[buildingId], regionId, 6, owner);
@@ -292,6 +292,7 @@ contract Main is Manageable, MainInterface {
         influenceContract.updateCellInfluence(x[0], y[0]);
         influenceContract.updateCellInfluence(x[1], y[1]);
 
+        emit BigBuildingBuilded(x[master], y[master], orientation);
     }
 
     function upgradeToMega(int256[4] x, int256[4] y) public payable {
@@ -304,7 +305,7 @@ contract Main is Manageable, MainInterface {
 
         uint8 base = landContract.mergeToken4x(x, y, msg.sender);
 
-        (address owner, uint16 regionId) = landContract.build(x[base], y[base], buildingId, buildingLevel, buildings[buildingId]);
+        (address owner, uint16 regionId, ) = landContract.build(x[base], y[base], buildingId, buildingLevel, buildings[buildingId]);
 
         influenceContract.addRegionShareBank(
             int(buildingTypes[buildings[buildingId]].price[6] * regionBankTax / 100),
@@ -317,12 +318,15 @@ contract Main is Manageable, MainInterface {
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
+            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
 
         for(uint8 i = 0; i < 4; i++) {
             influenceContract.setType(x[i], y[i], buildings[buildingId], regionId, 6, owner);
             influenceContract.updateCellInfluence(x[i], y[i]);
         }
+
+        emit BigBuildingBuilded(x[base], y[base], 3);
     }
 
     function demolition(int256 x, int256 y) public onlyLandOwner(x, y) {
@@ -353,10 +357,10 @@ contract Main is Manageable, MainInterface {
 
     function buildAndCalculateInfluences(
         int256 x, int256 y, uint16 buildingId, uint8 buildingLevel, uint256 buildingPrice
-    ) internal {
+    ) internal returns (uint32) {
         require(!landContract.isOnAuction(x, y));
 
-        (address owner, uint16 regionId) = landContract.build(x, y, buildingId, buildingLevel, buildings[buildingId]);
+        (address owner, uint16 regionId, uint32 seed) = landContract.build(x, y, buildingId, buildingLevel, buildings[buildingId]);
 
         if(buildingPrice > 0) {
             influenceContract.addRegionShareBank(
@@ -372,10 +376,23 @@ contract Main is Manageable, MainInterface {
         influenceContract.setType(x, y, buildings[buildingId], regionId, buildingLevel, owner);
 
         influenceContract.updateCellInfluence(x, y);
+
+        return seed;
     }
 
-    function addToRegionShareBank(uint16 regionId, uint256 value) external onlyManager {
-        influenceContract.addRegionShareBank(int256(value), regionId);
+    function setResourcesInfluence(int256 x, int256 y, uint16 regionId, uint8 resources, address owner) external {
+        require(msg.sender == address(landContract));
+
+        _setResourcesInfluence(x, y, regionId, resources, owner);
+    }
+
+    function _setResourcesInfluence(int256 x, int256 y, uint16 regionId, uint8 resources, address owner) internal {
+        influenceContract.setType(x, y, landContract.RESOURCES_TYPE_ID(), regionId, resources, owner);
+    }
+
+    function addToRegionShareBank(uint16 regionId, int256 value) external {
+        require(msg.sender == address(landContract) || msg.sender == address(regionContract));
+        influenceContract.addRegionShareBank(value, regionId);
     }
 
     function userWithdrawal(uint256 value) public {
@@ -399,7 +416,15 @@ contract Main is Manageable, MainInterface {
         influenceContract.moveToken(x, y, regionId, from, to);
     }
 
+    function () public payable {
+        require(msg.sender == address(landContract) || msg.sender == address(regionContract));
+    }
+
+
+    event OperationChange(address user, uint256 value);
     event LandBuy(uint256 indexed tokenId, int256 x, int256 y, uint256 buyPrice);
-    event Builded(int256 indexed x, int256 indexed y, uint16 buildingId, uint8 level);
+    event Builded(int256 indexed x, int256 indexed y, uint16 buildingId, uint8 level, uint32 seed);
     event Destroyed(int256 indexed x, int256 indexed y);
+    event BigBuildingBuilded(int256 base_x, int256 base_y, uint8 orientation);
+    event InfluencePayout(address user, uint256 value);
 }

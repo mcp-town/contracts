@@ -1,4 +1,4 @@
-pragma solidity 0.4.24;
+pragma solidity 0.4.25;
 
 import "./Manageable.sol";
 
@@ -41,6 +41,7 @@ contract Influence is Manageable {
     mapping(uint8 => InfluenceSideEffect[]) public influenceSideEffect;//buildingTypeId => side effect [max 10]
     mapping(uint8 => mapping(uint8 => int256)) public multipliers; //building type => level => influence
     mapping(uint8 => int256) public baseInfluences; //building type => level => influence
+    mapping(uint8 => mapping(uint8 => bool)) public isAffected;
 
 
     uint32 public period; // period size, default 1 day
@@ -49,10 +50,7 @@ contract Influence is Manageable {
 
     uint8 sharePercent = 3; // share percent from global bank
 
-    address serverSignatureAddress;
-    string public ethereumPrefix = "\x19Ethereum Signed Message:\n32";
-
-    int256 totalShare;
+    int256 public totalShare;
 
     constructor(uint32 _period) public {
         period = _period > 0 ? _period : 1 days;
@@ -134,6 +132,8 @@ contract Influence is Manageable {
                 startFrom: startFrom[i],
                 value : value[i]
             }));
+
+            isAffected[typeId][targetTypeId[i]] = true;
         }
     }
 
@@ -153,10 +153,6 @@ contract Influence is Manageable {
         for(uint8 i = 1; i <= 7; i++) {
             multipliers[_buildingType][i] = _multipliers[i - 1];
         }
-    }
-
-    function setServerSignatureAddress(address _signatureAddress) public onlyManager {
-        serverSignatureAddress = _signatureAddress;
     }
 
     function moveToken(int256 x, int256 y, uint16 regionId, address from, address to) external onlyManager {
@@ -235,18 +231,6 @@ contract Influence is Manageable {
         totalInfluence[cp] = totalInfluence[cp] <= 0 ? -1 : totalInfluence[cp];
 
         lastTotalInfluenceChange = cp;
-    }
-
-    function convertToBalanceValueSigned(address user, bytes influenceSignature, uint256 value, uint256 toPeriod) external onlyManager returns (uint256){
-        uint256 lc = lastConversion[user];
-
-        bytes32 message = keccak256(abi.encodePacked(ethereumPrefix, user, value, toPeriod, lc));
-
-        require(ecverify(message, influenceSignature, serverSignatureAddress));
-        _updateGlobalShareBank();
-
-        lastConversion[user] = toPeriod;
-        return value;
     }
 
 
@@ -387,7 +371,7 @@ contract Influence is Manageable {
     }
 
     function _updateCellInfluence(int256 x, int256 y, uint8 typeId, bool demolition) internal returns (int256)  {
-        if(influenceMap[x][y].level == 0) {
+        if(influenceMap[x][y].level == 0 || (typeId > 0 && !isAffected[influenceMap[x][y].typeId][typeId])) {
             return 0;
         }
 
@@ -401,7 +385,6 @@ contract Influence is Manageable {
         if(typeId > 0) {
             influenceMap[x][y].types = demolition ? getDecType(typeId, influenceMap[x][y].types) : getIncType(typeId, influenceMap[x][y].types);
         }
-
 
         InfluenceSideEffect[] storage sideEffects = influenceSideEffect[influenceMap[x][y].typeId];
 
@@ -447,7 +430,7 @@ contract Influence is Manageable {
     function _getTypes(int256 x, int256 y) internal view returns (uint256 types) {
         for(int256 xi = x-5; xi <= x+5; xi++) {
             for(int256 yi = y-5; yi <= y+5; yi++) {
-                if(xi == x && yi == y) {
+                if((xi == x && yi == y)) {
                     continue;
                 }
                 if(influenceMap[xi][yi].typeId > 0) {
@@ -506,9 +489,12 @@ contract Influence is Manageable {
         return value / (2 ** shift);
     }
 
-//TODO: change to internal
-    function currentPeriod() public view returns(uint256) {
+    function currentPeriod() internal view returns(uint256) {
         return now / period;
+    }
+
+    function getCurrentPeriod() public view returns(uint256) {
+        return currentPeriod();
     }
 
     function getCellInfluence(int256 x, int256 y) public view returns (int256) {
@@ -532,38 +518,14 @@ contract Influence is Manageable {
         return (baseInfluences[influenceMap[x][y].typeId] * multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level], baseInfluences[influenceMap[x][y].typeId] * multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level + 1]);
     }
 
-    function getPureTypesNear(int256 x, int256 y) public view returns (uint256) {
-        return influenceMap[x][y].types;
+    function getLastShareBankValues(uint16[] memory regionIds) public view returns (int256 globalShareBankSum, int256 regionShareBankSum) {
+        uint256 cp = currentPeriod();
+
+        globalShareBankSum = globalShareBank[cp - 1];
+
+        regionShareBankSum = 0;
+        for(uint256 i = 0; i < regionIds.length; i++) {
+            regionShareBankSum = regionShareBankSum + regionShareBank[regionIds[i]][cp];
+        }
     }
-
-    function ecrecovery(bytes32 hash, bytes sig) internal pure returns (address) {
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-
-        if (sig.length != 65) {
-            return address(0);
-        }
-
-        assembly {
-            r := mload(add(sig, 32))
-            s := mload(add(sig, 64))
-            v := and(mload(add(sig, 65)), 255)
-        }
-
-        if (v < 27) {
-            v += 27;
-        }
-
-        if (v != 27 && v != 28) {
-            return address(0);
-        }
-
-        return ecrecover(hash, v, r, s);
-    }
-
-    function ecverify(bytes32 hash, bytes sig, address signer) internal pure returns (bool) {
-        return signer == ecrecovery(hash, sig);
-    }
-
 }

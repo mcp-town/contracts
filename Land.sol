@@ -1,4 +1,4 @@
-pragma solidity 0.4.24;
+pragma solidity 0.4.25;
 
 import "./Manageable.sol";
 import "./UserBalance.sol";
@@ -28,12 +28,15 @@ contract Land is Manageable, Auction {
         uint8 buildingLevel;
         uint8 typeId;
         uint8 tokenType;// 0 - Regular, 1 - Vertical merged, 2 - horisontal merged, 3 - 4x merged
-        //Basic token always with highest x and y
+        uint32 seed;
+        //Basic token always with smallest x and y
     }
 
 
     mapping(int256 => mapping(int256 => MapCell)) public map;
     mapping(uint256 => Coordinates) public mapReverse;
+
+    mapping(uint256 => Coordinates[]) public merged; // tokenId =>
 
     mapping(uint256 => address) public approved;
     mapping(address => uint256) public balances;
@@ -49,7 +52,7 @@ contract Land is Manageable, Auction {
 
     uint8 defaultRadius = 5;
 
-    uint8 RESOURCES_TYPE_ID = 2;
+    uint8 public RESOURCES_TYPE_ID = 2;
 
     modifier notNullAddress(address _address) {
         require(address(0) != _address);
@@ -64,6 +67,8 @@ contract Land is Manageable, Auction {
     constructor(address userBalanceAddress) public {
         userBalanceContract = UserBalance(userBalanceAddress);
         isStepAuctionAllowed = true;
+        isFixedAuctionAllowed = true;
+        isRegionShareEnabled = true;
     }
 
     function init() external onlyManager {
@@ -73,7 +78,8 @@ contract Land is Manageable, Auction {
             buildingId : 0,
             buildingLevel : 0,
             typeId : 0,
-            tokenType: 0
+            tokenType: 0,
+            seed: 0
         }));
     }
 
@@ -81,43 +87,52 @@ contract Land is Manageable, Auction {
         mainContract = MainInterface(_mainContractAddress);
     }
 
+    function _createToken(int256 x, int256 y, address owner, uint256 buyPrice) internal returns(uint256){
+        tokens.push(LandToken({
+            owner : address(0),
+            buildingId : 0,
+            buildingLevel : map[x][y].resources,
+            typeId : map[x][y].resources > 0 ? RESOURCES_TYPE_ID : 0,
+            tokenType: 0,
+            seed: 0
+        }));
+
+        if(buyPrice > 0) {
+            map[x][y].buyPrice = buyPrice;
+        }
+        map[x][y].tokenId = tokens.length - 1;
+        mapReverse[map[x][y].tokenId] = Coordinates({x : x, y : y});
+        _transfer(address(0), owner, map[x][y].tokenId);
+
+        if(map[x][y].resources > 0) {
+            mainContract.setResourcesInfluence(x, y, map[x][y].region, map[x][y].resources, owner);
+        }
+
+        emit LandOwned(x, y, map[x][y].tokenId);
+        return tokens.length - 1;
+    }
+
 
     function createToken(int256 x, int256 y, address owner, uint256 buyPrice) external onlyManager returns(uint256) {
-        tokens.push(LandToken({
-            owner : address(0),
-            buildingId : 0,
-            buildingLevel : 0,
-            typeId : map[x][y].resources > 0 ? RESOURCES_TYPE_ID : 0,
-            tokenType: 0
-        }));
-
-        map[x][y].buyPrice = buyPrice;
-        map[x][y].tokenId = tokens.length - 1;
-        mapReverse[map[x][y].tokenId] = Coordinates({x : x, y : y});
-        _transfer(address(0), owner, map[x][y].tokenId);
-        emit LandOwned(x, y, map[x][y].tokenId);
-        return tokens.length - 1;
+        return _createToken(x, y, owner, buyPrice);
     }
 
-    function recreateToken(int256 x, int256 y, address owner) internal returns (uint256) {
-        tokens.push(LandToken({
-            owner : address(0),
-            buildingId : 0,
-            buildingLevel : 0,
-            typeId : 0,
-            tokenType: 0
-        }));
-
-        map[x][y].tokenId = tokens.length - 1;
-        mapReverse[map[x][y].tokenId] = Coordinates({x : x, y : y});
-        _transfer(address(0), owner, map[x][y].tokenId);
-        emit LandOwned(x, y, map[x][y].tokenId);
-        return tokens.length - 1;
+    function mintLand(int256[] x, int256[] y, uint256[] buyPrice, address[] owner) public onlyManager {
+        for (uint256 i = 0; i < x.length; i++) {
+            _createToken(x[i], y[i], owner[i], buyPrice[i]);
+        }
     }
-
 
     function setOnAuction(uint256 tokenId, uint256 startPrice, uint256 endPrice, uint32 duration) public onlyTokenOwner(tokenId) {
         _setOnStepAuction(tokenId, startPrice, endPrice, msg.sender, duration);
+    }
+
+    function setOnFixedAuction(uint256 tokenId, uint256 startPrice) public onlyTokenOwner(tokenId) {
+        _setOnFixedAuction(tokenId, startPrice, msg.sender);
+    }
+
+    function cancelAuction(uint256 tokenId) public onlyTokenOwner(tokenId) {
+        _cancelAuction(tokenId);
     }
 
     function payout(int256 x, int256 y) external onlyManager {
@@ -138,7 +153,7 @@ contract Land is Manageable, Auction {
     }
 
     function isOnAuction(int256 x, int256 y) external view returns (bool) {
-        return isOnAuction(map[x][y].tokenId);
+        return _isOnAuction(map[x][y].tokenId);
     }
 
     function canBuild(int256 x, int256 y) external view returns (bool) {
@@ -147,18 +162,22 @@ contract Land is Manageable, Auction {
 
     function build(
         int256 x, int256 y, uint16 buildingId, uint8 buildingLevel, uint8 typeId
-    ) external onlyManager returns (address owner, uint16 regionId) {
+    ) external onlyManager returns (address, uint16, uint32) {
         require(map[x][y].resources == 0);
-        require(!isOnAuction(map[x][y].tokenId));
+        require(!_isOnAuction(map[x][y].tokenId));
         tokens[map[x][y].tokenId].buildingId = buildingId;
         tokens[map[x][y].tokenId].buildingLevel = buildingLevel;
         tokens[map[x][y].tokenId].typeId = typeId;
 
-        return (tokens[map[x][y].tokenId].owner, map[x][y].region);
+        if(buildingId == 1) {
+            tokens[map[x][y].tokenId].seed = _createSeed(x, y);
+        }
+
+        return (tokens[map[x][y].tokenId].owner, map[x][y].region, tokens[map[x][y].tokenId].seed);
     }
 
     function demolition(int256 x, int256 y) external onlyManager {
-        require(!isOnAuction(map[x][y].tokenId));
+        require(!_isOnAuction(map[x][y].tokenId));
         require(tokens[map[x][y].tokenId].tokenType == 0);
 
         tokens[map[x][y].tokenId].buildingId = 0;
@@ -167,7 +186,7 @@ contract Land is Manageable, Auction {
     }
 
     function demolitionHuge(int256 x, int256 y) external onlyManager returns (int256[2] xr, int256[2] yr) {
-        require(!isOnAuction(map[x][y].tokenId));
+        require(!_isOnAuction(map[x][y].tokenId));
         require(tokens[map[x][y].tokenId].tokenType == 1 || tokens[map[x][y].tokenId].tokenType == 2);
         xr[0] = x;
         yr[0] = y;
@@ -182,7 +201,7 @@ contract Land is Manageable, Auction {
                     xr[index] = xi;
                     yr[index] = yi;
                     index++;
-                    map[xi][yi].tokenId = recreateToken(xi, yi, tokens[map[xi][yi].tokenId].owner);
+                    map[xi][yi].tokenId = _createToken(xi, yi, tokens[map[xi][yi].tokenId].owner, 0);
                 }
             }
         }
@@ -193,7 +212,7 @@ contract Land is Manageable, Auction {
     }
 
     function demolitionMega(int256 x, int256 y) external onlyManager returns (int256[4] xr, int256[4] yr) {
-        require(!isOnAuction(map[x][y].tokenId));
+        require(!_isOnAuction(map[x][y].tokenId));
         require(tokens[map[x][y].tokenId].tokenType == 3);
         xr[0] = x;
         yr[0] = y;
@@ -210,7 +229,7 @@ contract Land is Manageable, Auction {
                     yr[index] = yi;
                     index++;
 
-                    map[xi][yi].tokenId = recreateToken(xi, yi, tokens[map[xi][yi].tokenId].owner);
+                    map[xi][yi].tokenId = _createToken(xi, yi, tokens[map[xi][yi].tokenId].owner, 0);
                 }
             }
         }
@@ -272,8 +291,7 @@ contract Land is Manageable, Auction {
 
     function mintMap(int256[] x, int256[] y, uint16 region) public onlyManager {//Only one region per call
         for (uint256 i = 0; i < x.length; i++) {
-            MapCell storage tmpCell = map[x[i]][y[i]];
-            tmpCell.region = region;
+            map[x[i]][y[i]].region = region;
         }
     }
 
@@ -283,22 +301,7 @@ contract Land is Manageable, Auction {
         }
     }
 
-    function mintLand(int256[] x, int256[] y, uint256[] buyPrice, address[] owner) public onlyManager {
-        for (uint256 i = 0; i < x.length; i++) {
-            tokens.push(LandToken({
-                owner : owner[i],
-                buildingId : 0,
-                buildingLevel : 0,
-                typeId : 0,
-                tokenType : 0
-            }));
 
-            map[x[i]][y[i]].buyPrice = buyPrice[i];
-            map[x[i]][y[i]].tokenId = tokens.length - 1;
-            mapReverse[tokens.length - 1] = Coordinates({x : x[i], y : y[i]});
-            emit LandOwned(x[i], y[i], tokens.length - 1);
-        }
-    }
 
     function getRegion(int256 x, int256 y) public view returns (uint16) {
         return map[x][y].region;
@@ -328,7 +331,7 @@ contract Land is Manageable, Auction {
         return false;
     }
 
-    function mergeToken2x(int256[2] x, int256[2] y, address owner) external onlyManager returns (int256, int256){
+    function mergeToken2x(int256[2] x, int256[2] y, address owner) external onlyManager returns (uint8, uint8){
         require(
             (x[0] == x[1] && (y[0] - 1 == y[1] || y[0] == y[1] - 1))
             || (y[0] == y[1] && (x[0] - 1 == x[1] || x[0] == x[1] - 1)), "Only nearby alowed");
@@ -346,22 +349,25 @@ contract Land is Manageable, Auction {
 
         uint8 master;
         uint8 slave;
+        uint8 orientation;
 
         if(x[0] != x[1]) {
             master = x[0] > x[1] ? 0 : 1;
             slave = x[0] > x[1] ? 1 : 0;
             tokens[map[x[master]][y[master]].tokenId].tokenType = 1;
+            orientation = 1;
         } else {
             master = y[0] > y[1] ? 0 : 1;
             slave = y[0] > y[1] ? 1 : 0;
             tokens[map[x[master]][y[master]].tokenId].tokenType = 2;
+            orientation = 2;
         }
 
         delete mapReverse[map[x[slave]][y[slave]].tokenId];
         tokens[map[x[master]][y[master]].tokenId].buildingLevel = 6;
         _transfer(owner, address(0), map[x[slave]][y[slave]].tokenId);
         map[x[slave]][y[slave]].tokenId = map[x[master]][y[master]].tokenId;
-        return (x[master], y[master]);
+        return (master, orientation);
     }
 
     function mergeToken4x(
@@ -432,7 +438,7 @@ contract Land is Manageable, Auction {
         }
     }
 
-    function getBuildingsCount(int256 x, int256 y, uint8 range) public view returns (uint[8] types) {
+    function getBuildingsCount(int256 x, int256 y, uint8 range) external view returns (uint[8] types) {
         for (int256 xi = x - range; xi <= x + range; xi++) {
             for (int256 yi = y - range; yi <= y + range; yi++) {
                 if(xi == x && yi == y) {
@@ -447,11 +453,19 @@ contract Land is Manageable, Auction {
         }
     }
 
-    function getTokenId(int256 x, int256 y) public view returns (uint256) {
+    function _createSeed(int256 x, int256 y) internal view returns (uint32) {
+        return uint32(keccak256(abi.encodePacked(now * uint(block.coinbase) * uint(x) / uint(y) + tokens.length)));
+    }
+
+    function getResources(int256 x, int256 y) external view returns (uint8) {
+        return map[x][y].resources;
+    }
+
+    function getTokenId(int256 x, int256 y) external view returns (uint256) {
         return map[x][y].tokenId;
     }
 
-    function getBuyPrice(int256 x, int256 y) public view returns (uint256) {
+    function getBuyPrice(int256 x, int256 y) external view returns (uint256) {
         return map[x][y].buyPrice;
     }
 
@@ -497,13 +511,12 @@ contract Land is Manageable, Auction {
         userBalanceContract.addBalance(_to, _value, _reason);
     }
 
-    function _toRegionShareBank(uint256 _tokenId, uint256 _value) internal {
+    function _toRegionShareBank(uint256 _tokenId, int256 _value) internal {
         mainContract.addToRegionShareBank(map[mapReverse[_tokenId].x][mapReverse[_tokenId].y].region, _value);
     }
 
-    function _transfer(address _from, address _to, uint256 _tokenId) internal {
+    function _transfer(address _from, address _to, uint256 _tokenId) internal notOnAuction(_tokenId) {
         require(tokens[_tokenId].owner == _from, "Owner not correct");
-        require(activeAuctions[_tokenId].activeTill == 0);
 
         if(_from != address(0)) {
             mainContract.transferCallback(mapReverse[_tokenId].x, mapReverse[_tokenId].y, map[mapReverse[_tokenId].x][mapReverse[_tokenId].y].region, _from, _to);
@@ -511,15 +524,16 @@ contract Land is Manageable, Auction {
 
         tokens[_tokenId].owner = _to;
         approved[_tokenId] = address(0);
-        balances[_from] -= 1;
+        if(_from != address(0)) {
+            balances[_from] -= 1;
+        }
         balances[_to] += 1;
         emit Transfer(_from, _to, _tokenId);
     }
 
-    function _transferEther(uint256 value) internal {
-        address(mainContract).transfer(value);
+    function _transferEther() internal {
+        address(mainContract).transfer(address(this).balance);
     }
-
     event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event LandOwned(int256 x, int256 y, uint256 tokenId);

@@ -1,4 +1,4 @@
-pragma solidity 0.4.24;
+pragma solidity 0.4.25;
 
 import "./Manageable.sol";
 
@@ -8,14 +8,14 @@ contract UserBalance is Manageable {
     struct Journal {
         uint256 value;
         bool charge;
-        uint8 transactionType;// 0 - land payout, 1 - region payout, 2 - change, 3 - auction, 4 - influence payout
+        uint8 transactionType;// 0 - land payout, 1 - region payout, 2 - change, 3 - auction, 4 - influence payout, 5 - withdrawal
         uint ts;
     }
 
     mapping (address => uint256) public userBalance;
     mapping (address => Journal[]) public userJournal;
 
-    uint256 totalBalance = 0;
+    uint256 public totalBalance = 0;
 
     function addBalance(address user, uint256 value, uint8 transactionType) external onlyManager returns (uint256) {
 
@@ -26,7 +26,6 @@ contract UserBalance is Manageable {
             value: value,
             charge: true,
             transactionType: transactionType,
-            // solium-disable-next-line
             ts: now
         }));
 
@@ -55,7 +54,7 @@ contract UserBalance is Manageable {
     }
 
     function userWithdrawal(uint256 value, address user) external onlyManager {
-        decBalance(user, value, 3);
+        decBalance(user, value, 5);
         emit UserWithdrawalDone(msg.sender, value);
     }
 
