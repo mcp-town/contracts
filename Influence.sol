@@ -144,8 +144,31 @@ contract Influence is Manageable {
         influenceMap[x][y].level = level;
     }
 
+    function setTypeAndUpdate(int256 x, int256 y, uint8 typeId, uint16 regionId, uint8 level, address owner) external onlyManager {
+        influenceMap[x][y].typeId = typeId;
+        influenceMap[x][y].regionId = regionId;
+        influenceMap[x][y].owner = owner;
+        influenceMap[x][y].level = level;
+        _updateCellInfluenceCallable(x, y);
+    }
+
+
+    function setLevel(int256 x, int256 y, uint8 level) external onlyManager {
+        influenceMap[x][y].level = level;
+    }
+
+    function setLevelAndUpdate(int256 x, int256 y, uint8 level) external onlyManager {
+        influenceMap[x][y].level = level;
+        _updateCellInfluenceCallable(x, y);
+    }
+
     function markForDemolition(int256 x, int256 y) external onlyManager {
         influenceMap[x][y].level = 0;
+    }
+
+    function markForDemolitionAndUpdate(int256 x, int256 y) external onlyManager {
+        influenceMap[x][y].level = 0;
+        _updateCellInfluenceCallable(x, y);
     }
 
     function setBaseInfluenceAndMultiplier(uint8 _buildingType, int256 _influence, int256[7] _multipliers) external onlyManager {
@@ -175,9 +198,24 @@ contract Influence is Manageable {
 
         if(to == address(0)) {
             totalInfluence[cp] = totalInfluence[lastTotalInfluenceChange] - influenceMap[x][y].influence;
+            if(totalInfluence[cp] == 0) {
+                totalInfluence[cp] = -1;
+            }
+
             if(lastTotalInfluenceChange != cp) {
                 lastTotalInfluenceChange = cp;
             }
+
+            regionsInfluence[regionId][cp] = regionsInfluence[regionId][cp] - influenceMap[x][y].influence;
+
+            if(regionsInfluence[regionId][cp] == 0) {
+                regionsInfluence[regionId][cp] = -1;
+            }
+
+            if(lastRegionInfluenceChange[regionId] != cp) {
+                lastRegionInfluenceChange[regionId] = cp;
+            }
+
             return;
         }
 
@@ -328,7 +366,12 @@ contract Influence is Manageable {
         return totalUserBalanceValue;
     }
 
-    function updateCellInfluence(int256 x, int256 y) external {
+    function updateCellInfluence(int256 x, int256 y) external onlyManager {
+        _updateCellInfluenceCallable(x, y);
+    }
+
+
+    function _updateCellInfluenceCallable(int256 x, int256 y) internal {
         int256 diff;
         if(influenceMap[x][y].level == 0) {
             if(influenceMap[x][y].influence > 0) {
