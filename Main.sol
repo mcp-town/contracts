@@ -19,13 +19,9 @@ contract Main is Manageable, MainInterface {
         uint8 count;
     }
 
-    struct BuildingType {
-        uint256[7] price;
-    }
-
 
     mapping(uint16 => uint8) public buildings; // BuildingId => typeId
-    mapping(uint8 => BuildingType) private buildingTypes;
+    mapping(uint8 => uint256[7]) private buildingPrices;
     mapping(uint8 => mapping(uint8 => Requirements[])) public buildingRequirements; // type => level => Requirements
 
     //Building fees
@@ -48,7 +44,7 @@ contract Main is Manageable, MainInterface {
         userBalanceContract = UserBalance(_userBalance);
     }
 
-    modifier onlyLandOwner(int256 x, int256 y) {
+    modifier onlyLandOwner(int64 x, int64 y) {
         require(landContract.isLandOwner(x, y, msg.sender), "Only land owner");
         _;
     }
@@ -59,13 +55,28 @@ contract Main is Manageable, MainInterface {
         regionContract.init();
     }
 
-    function addBuildingType(uint8 typeId, uint256[7] price) public onlyManager {
-        BuildingType storage newBuildingType = buildingTypes[typeId];
-        newBuildingType.price = price;
+    function openSale() public onlyManager {
+        landContract.setSaleOpen();
+        influenceContract.setSaleOpen();
+        regionContract.setSaleOpen();
+        setSaleOpen();
     }
 
-    function addBuilding(uint16 buildingId, uint8 typeId) public onlyManager {
-        buildings[buildingId] = typeId;
+    function addBuildingType(uint8 typeId, uint256[7] price) public onlyManager {
+        buildingPrices[typeId] = price;
+    }
+
+    function addBuildingPrices(uint8[] typeId, uint256[7][] price) public onlyManager {
+        for(uint256 i = 0; i < typeId.length; i++) {
+            buildingPrices[typeId[i]] = price[i];
+        }
+
+    }
+
+    function addBuildings(uint16[] buildingIds, uint8[] typeIds) public onlyManager {
+        for(uint256 i = 0; i < buildingIds.length; i++) {
+            buildings[buildingIds[i]] = typeIds[i];
+        }
     }
 
     function addToGlobalShareBank() public payable {
@@ -88,7 +99,7 @@ contract Main is Manageable, MainInterface {
         }
     }
 
-    function getLandPrice(int256 x, int256 y) public view returns (uint256) {
+    function getLandPrice(int64 x, int64 y) public view returns (uint256) {
         uint16 region = landContract.getRegion(x, y);
 
         if (!landContract.canBuy(x, y) || !regionContract.canSaleLands(region)) {
@@ -105,7 +116,7 @@ contract Main is Manageable, MainInterface {
         return landValue + royaltyValue + taxValue;
     }
 
-    function buyLand(int256 x, int256 y) public payable {
+    function buyLand(int64 x, int64 y) public payable onlyOnSale {
         require(landContract.canBuy(x, y), "Land cant be sold");
 
         (uint256 landValue, uint8 tokensBought) = landContract.getPrice(x, y);
@@ -123,12 +134,13 @@ contract Main is Manageable, MainInterface {
         uint256 tokenId = landContract.createToken(x, y, msg.sender, totalValue);
 
         landContract.payout(x, y);
-        regionContract.payout(region, taxValue);
+        regionContract.payout(region, taxValue, 0);
 
         if(msg.value - totalValue > 0) {
             userBalanceContract.addBalance(msg.sender, msg.value - totalValue, 2);
-            emit OperationChange(msg.sender, msg.value - totalValue);
         }
+
+        beneficiary.transfer(royaltyValue);
 
         emit LandBuy(tokenId, x, y, totalValue);
     }
@@ -142,7 +154,7 @@ contract Main is Manageable, MainInterface {
     }
 
 
-    function checkRequirements(int256 x, int256 y, uint16 buildingId, uint8 buildingLevel) public view returns (bool) {
+    function checkRequirements(int64 x, int64 y, uint16 buildingId, uint8 buildingLevel) public view returns (bool) {
         (uint16 currentBuilding, uint8 currentBuildingLevel) = landContract.getBuilding(x, y);
         if((currentBuilding != buildingId && currentBuilding != 0) || buildingLevel != currentBuildingLevel + 1) {
             return false;
@@ -175,7 +187,7 @@ contract Main is Manageable, MainInterface {
         }
     }
 
-    function getMissedRequirementTypes(int256 x, int256 y, uint8 typeId, uint8 level) public view returns (uint8[8] counts, uint8[8] levels, uint8[8] ranges) {
+    function getMissedRequirementTypes(int64 x, int64 y, uint8 typeId, uint8 level) public view returns (uint8[8] counts, uint8[8] levels, uint8[8] ranges) {
         Requirements[] storage req = buildingRequirements[typeId][level];
         for (uint256 i = 0; i < req.length; i++) {
             uint8 reqCount = landContract.getBuildingsCountByType(
@@ -190,25 +202,34 @@ contract Main is Manageable, MainInterface {
         }
     }
 
-    function getBuildPrice(int256 x, int256 y, uint16 buildingId, uint8 buildingLevel) public view returns (uint256) {
+    function getBuildPrice(int64 x, int64 y, uint16 buildingId, uint8 buildingLevel) public view returns (uint256 fullPrice) {
         if(!landContract.canBuild(x, y)) {
             return 0;
         }
         uint256 regionTax = regionContract.getTax(landContract.getRegion(x, y));
 
-        uint256 baseBuildingPrice = buildingTypes[buildings[buildingId]].price[buildingLevel - 1];
+        uint256 baseBuildingPrice = buildingPrices[buildings[buildingId]][buildingLevel - 1];
 
-        return baseBuildingPrice  + ((baseBuildingPrice * developerTax *  regionTax) / 10000) / 2;
+        return baseBuildingPrice  + (baseBuildingPrice  *  regionTax) / 200;
     }
 
-    function getUpgradePrice(int256 x, int256 y) public view returns (uint256) {
+    function _getBuildPrice(uint16 buildingId, uint8 buildingLevel, uint16 regionId) internal view returns (uint256 fullPrice, uint256 regionFee) {
+        uint256 regionTax = regionContract.getTax(regionId);
+
+        uint256 baseBuildingPrice = buildingPrices[buildings[buildingId]][buildingLevel - 1];
+
+        fullPrice = baseBuildingPrice  + (baseBuildingPrice  *  regionTax) / 200;
+        regionFee = (baseBuildingPrice  *  regionTax) / 200;
+    }
+
+    function getUpgradePrice(int64 x, int64 y) public view returns (uint256) {
         (uint16 buildingId, uint8 buildingLevel) = landContract.getBuilding(x, y);
 
         uint256 regionTax = regionContract.getTax(landContract.getRegion(x, y));
 
-        uint256 baseBuildingPrice = buildingTypes[buildings[buildingId]].price[buildingLevel];
+        uint256 baseBuildingPrice = buildingPrices[buildings[buildingId]][buildingLevel];
 
-        return baseBuildingPrice  + ((baseBuildingPrice * developerTax *  regionTax) / 10000) / 2;
+        return baseBuildingPrice  + (baseBuildingPrice  *  regionTax) / 200;
     }
 
     function getBuildPrices(uint16 regionId) public view returns (uint256[9][9] prices) {
@@ -216,109 +237,135 @@ contract Main is Manageable, MainInterface {
         uint256 regionTax = regionContract.getTax(regionId);
 
         for (uint8 i = 1; i < 9; i++) {
-            for (uint256 j = 0; j < buildingTypes[i].price.length; j++) {
-                uint256 baseBuildingPrice = buildingTypes[i].price[j];
-                prices[i][j] = baseBuildingPrice  + ((baseBuildingPrice * developerTax *  regionTax) / 10000) / 2;
+            for (uint256 j = 0; j < buildingPrices[i].length; j++) {
+                uint256 baseBuildingPrice = buildingPrices[i][j];
+                prices[i][j] = baseBuildingPrice  + (baseBuildingPrice  *  regionTax) / 200;
             }
         }
     }
 
     function build(
-        int256 x, int256 y, uint16 buildingId
+        int64 x, int64 y, uint16 buildingId
     ) public payable onlyLandOwner(x, y) {
-        uint256 buildingPrice = getBuildPrice(x, y, buildingId, 1);
+        require(landContract.canBuild(x, y));
+        uint16 regionId = landContract.getRegion(x, y);
+        (uint256 buildingPrice, uint256 regionFee) = _getBuildPrice(buildingId, 1, regionId);
+
         require(buildingId > 0);
         require(buildingPrice > 0 && buildingPrice <= msg.value);
         require(checkRequirements(x, y, buildingId, 1), "Requirements not satisfied");
 
-        buildAndCalculateInfluences(x, y, buildingId, 1, buildingPrice);
+        _buildAndCalculateInfluences(x, y, buildingId, 1, buildingPrice);
+
+        regionContract.payout(regionId, regionFee, 1);
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
-            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
+
+        beneficiary.transfer(getFee(buildingPrices[buildings[buildingId]][0]));
     }
 
-    function upgrade(int256 x, int256 y) public payable onlyLandOwner(x, y) {
-
+    function upgrade(int64 x, int64 y) public payable onlyLandOwner(x, y) {
+        require(landContract.canBuild(x, y));
         (uint16 buildingId, uint8 buildingLevel) = landContract.getBuilding(x, y);
+
         require(buildingId > 0);
         require(buildingLevel < 5);
 
-        uint256 buildingPrice = getBuildPrice(x, y, buildingId, buildingLevel + 1);
+        uint16 regionId = landContract.getRegion(x, y);
+        (uint256 buildingPrice, uint256 regionFee) = _getBuildPrice(buildingId, buildingLevel + 1, regionId);
 
         require(buildingPrice <= msg.value);
         require(checkRequirements(x, y, buildingId, buildingLevel + 1), "Requirements not satisfied");
 
-        buildAndCalculateInfluences(x, y, buildingId, buildingLevel + 1, buildingPrice);
+        _buildAndCalculateInfluences(x, y, buildingId, buildingLevel + 1, buildingPrice);
+
+        regionContract.payout(regionId, regionFee, 1);
+
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
-            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
+
+        beneficiary.transfer(getFee(buildingPrices[buildings[buildingId]][buildingLevel]));
     }
 
-    function upgradeToHuge(int256 x, int256 y, bool isHorisontal) public payable {
+    function upgradeToHuge(int64 x, int64 y, bool isHorisontal) public payable {
+        require(landContract.canBuild(x, y));
         (uint16 buildingId, ) = landContract.getBuilding(x, y);
 
-        uint256 buildingPrice = getBuildPrice(x, y, buildingId, 6);
+        uint16 regionId = landContract.getRegion(x, y);
+        (uint256 buildingPrice, uint256 regionFee) = _getBuildPrice(buildingId, 6, regionId);
+
 
         require(msg.value >= buildingPrice);
 
-        int256[2] memory xToMerge = isHorisontal ? [x, x]     : [x, x - 1];
-        int256[2] memory yToMerge = isHorisontal ? [y, y - 1] : [y, y];
+        int64[2] memory xToMerge = isHorisontal ? [x, x]     : [x, x - 1];
+        int64[2] memory yToMerge = isHorisontal ? [y, y - 1] : [y, y];
 
-        uint16 regionId = landContract.upgradeToHuge(xToMerge, yToMerge, msg.sender);
+        landContract.upgradeToHuge(xToMerge, yToMerge, msg.sender);
 
         influenceContract.addRegionShareBank(
-            int(buildingTypes[buildings[buildingId]].price[6] * regionBankTax / 100),
+            int(buildingPrices[buildings[buildingId]][5] * regionBankTax / 100),
             regionId
         );
         influenceContract.addGlobalShareBank(
-            int(buildingTypes[buildings[buildingId]].price[6] * globalBankTax / 100)
+            int(buildingPrices[buildings[buildingId]][5] * globalBankTax / 100)
         );
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
-            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
+
+        regionContract.payout(regionId, regionFee, 1);
 
         influenceContract.setLevelAndUpdate(xToMerge[0], yToMerge[0], 6);
         influenceContract.setLevelAndUpdate(xToMerge[1], yToMerge[1], 6);
+
+        beneficiary.transfer(getFee(buildingPrices[buildings[buildingId]][5]));
+
     }
 
-    function upgradeToMega(int256 x, int256 y) public payable {
+    function upgradeToMega(int64 x, int64 y) public payable {
+        require(landContract.canBuild(x, y));
 
         (uint16 buildingId, ) = landContract.getBuilding(x, y);
 
-        uint256 buildingPrice = getBuildPrice(x, y, buildingId, 6);
+        uint16 regionId = landContract.getRegion(x, y);
+        (uint256 buildingPrice, uint256 regionFee) = _getBuildPrice(buildingId, 7, regionId);
+
         require(msg.value >= buildingPrice);
 
-        int256[4] memory xToMerge = [x, x,     x - 1, x - 1];
-        int256[4] memory yToMerge = [y, y - 1, y,     y - 1];
+        int64[4] memory xToMerge = [x, x,     x - 1, x - 1];
+        int64[4] memory yToMerge = [y, y - 1, y,     y - 1];
 
 
-        uint16 regionId = landContract.upgradeToMega(xToMerge, yToMerge, msg.sender);
+        landContract.upgradeToMega(xToMerge, yToMerge, msg.sender);
 
         influenceContract.addRegionShareBank(
-            int(buildingTypes[buildings[buildingId]].price[6] * regionBankTax / 100),
+            int(buildingPrices[buildings[buildingId]][6] * regionBankTax / 100),
             regionId
         );
 
         influenceContract.addGlobalShareBank(
-            int(buildingTypes[buildings[buildingId]].price[6] * globalBankTax / 100)
+            int(buildingPrices[buildings[buildingId]][6] * globalBankTax / 100)
         );
 
         if(msg.value > buildingPrice) {
             userBalanceContract.addBalance(msg.sender, msg.value - buildingPrice, 2);
-            emit OperationChange(msg.sender, msg.value - buildingPrice);
         }
+
+        regionContract.payout(regionId, regionFee, 1);
 
         for(uint8 i = 0; i < 4; i++) {
             influenceContract.setLevelAndUpdate(xToMerge[i], yToMerge[i], 7);
         }
+
+        beneficiary.transfer(getFee(buildingPrices[buildings[buildingId]][6]));
+
     }
 
-    function demolition(int256 x, int256 y) public onlyLandOwner(x, y) {
+    function demolition(int64 x, int64 y) public onlyLandOwner(x, y) {
         uint8 orientation = landContract.demolition(x, y);
         if(orientation == 0) {
             influenceContract.markForDemolitionAndUpdate(x, y);
@@ -341,8 +388,8 @@ contract Main is Manageable, MainInterface {
 
     }
 
-    function buildAndCalculateInfluences(
-        int256 x, int256 y, uint16 buildingId, uint8 buildingLevel, uint256 buildingPrice
+    function _buildAndCalculateInfluences(
+        int64 x, int64 y, uint16 buildingId, uint8 buildingLevel, uint256 buildingPrice
     ) internal {
         require(!landContract.isOnAuction(x, y));
 
@@ -350,12 +397,13 @@ contract Main is Manageable, MainInterface {
 
         if(buildingPrice > 0) {
             influenceContract.addRegionShareBank(
-                int(buildingTypes[buildings[buildingId]].price[buildingLevel - 1] * regionBankTax / 100),
+                int(buildingPrices[buildings[buildingId]][buildingLevel - 1] * regionBankTax / 100),
                 regionId
             );
             influenceContract.addGlobalShareBank(
-                int(buildingTypes[buildings[buildingId]].price[buildingLevel - 1] * globalBankTax / 100)
+                int(buildingPrices[buildings[buildingId]][buildingLevel - 1] * globalBankTax / 100)
             );
+
         }
 
 
@@ -366,14 +414,13 @@ contract Main is Manageable, MainInterface {
         }
     }
 
-    function setResourcesInfluence(int256 x, int256 y, uint16 regionId, uint8 resources, address owner) external {
+    function setResourcesInfluence(int64 x, int64 y, uint16 regionId, uint8 resources, address owner) external {
         require(msg.sender == address(landContract));
-
-        _setResourcesInfluence(x, y, regionId, resources, owner);
-    }
-
-    function _setResourcesInfluence(int256 x, int256 y, uint16 regionId, uint8 resources, address owner) internal {
-        influenceContract.setTypeAndUpdate(x, y, landContract.RESOURCES_TYPE_ID(), regionId, resources, owner);
+        if(saleOpen) {
+            influenceContract.setTypeAndUpdate(x, y, 2, regionId, resources, owner);
+        } else {
+            influenceContract.setType(x, y, 2, regionId, resources, owner);
+        }
     }
 
     function addToRegionShareBank(uint16 regionId, int256 value) external {
@@ -381,10 +428,14 @@ contract Main is Manageable, MainInterface {
         influenceContract.addRegionShareBank(value, regionId);
     }
 
-    function userWithdrawal(uint256 value) public {
-        userBalanceContract.userWithdrawal(value, msg.sender);
-        require(address(this).balance >= value);
-        msg.sender.transfer(value);
+    function addToGlobalShareBankCallable(int256 value) external {
+        require(msg.sender == address(landContract) || msg.sender == address(regionContract));
+        influenceContract.addGlobalShareBank(value);
+    }
+
+    function sendToBeneficiary(uint256 value) external {
+        require(msg.sender == address(landContract) || msg.sender == address(regionContract));
+        beneficiary.transfer(value);
     }
 
     function userWithdrawal() public {
@@ -396,18 +447,34 @@ contract Main is Manageable, MainInterface {
         }
     }
 
-    function transferCallback(int256 x, int256 y, uint16 regionId, address from, address to) external {
+    function setTax(uint8 _developerTax, uint8 _regionBankTax, uint8 _globalBankTax) public onlyOwner {
+        require(_developerTax + _regionBankTax + _globalBankTax == 100);
+        developerTax = _developerTax;
+        regionBankTax = _regionBankTax;
+        globalBankTax = _globalBankTax;
+    }
+
+    function getFee(uint256 value) internal view returns (uint256) {
+        return developerTax * value / 100;
+    }
+
+    function regionOwner(uint16 regionId) external returns (address){
+        return regionContract.getOwner(regionId);
+    }
+
+    function transferCallback(int64 x, int64 y, uint16 regionId, address from, address to) external {
         require(msg.sender == address(landContract));
 
         influenceContract.moveToken(x, y, regionId, from, to);
     }
 
     function () public payable {
-        require(msg.sender == address(landContract) || msg.sender == address(regionContract));
+        if(msg.sender != address(landContract) && msg.sender != address(regionContract)) {
+            influenceContract.addGlobalShareBank(int(msg.value));
+        }
     }
 
 
-    event OperationChange(address user, uint256 value);
-    event LandBuy(uint256 indexed tokenId, int256 x, int256 y, uint256 buyPrice);
+    event LandBuy(uint256 indexed tokenId, int64 x, int64 y, uint256 buyPrice);
     event InfluencePayout(address user, uint256 value);
 }

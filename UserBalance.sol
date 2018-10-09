@@ -8,20 +8,16 @@ contract UserBalance is Manageable {
     struct Journal {
         uint256 value;
         bool charge;
-        uint8 transactionType;// 0 - land payout, 1 - region payout, 2 - change, 3 - auction, 4 - influence payout, 5 - withdrawal
+        uint8 transactionType;// 0 - land payout, 1 - region payout, 2 - change, 3 - auction payout, 4 - influence payout, 5 - withdrawal, 6 - auction fee, 7 - auction change
         uint ts;
     }
 
     mapping (address => uint256) public userBalance;
     mapping (address => Journal[]) public userJournal;
 
-    uint256 public totalBalance = 0;
-
     function addBalance(address user, uint256 value, uint8 transactionType) external onlyManager returns (uint256) {
 
         userBalance[user] += value;
-        totalBalance += value;
-
         userJournal[user].push(Journal({
             value: value,
             charge: true,
@@ -36,7 +32,6 @@ contract UserBalance is Manageable {
         require(userBalance[user] >= value, "Insufficient balance");
 
         userBalance[user] -= value;
-        totalBalance -= value;
 
         userJournal[user].push(Journal({
             value: value,
@@ -55,7 +50,7 @@ contract UserBalance is Manageable {
 
     function userWithdrawal(uint256 value, address user) external onlyManager {
         decBalance(user, value, 5);
-        emit UserWithdrawalDone(msg.sender, value);
+        emit UserWithdrawalDone(user, value);
     }
 
     function getLog20(

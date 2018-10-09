@@ -17,6 +17,17 @@ contract Manageable is Beneficiary {
         managers[msg.sender] = true;
     }
 
+    bool saleOpen = false;
+
+    modifier onlyOnSale() {
+        require(saleOpen);
+        _;
+    }
+
+    function setSaleOpen() public onlyManager {
+        saleOpen = true;
+    }
+
     function setManager(address _manager) public onlyOwner {
         managers[_manager] = true;
     }

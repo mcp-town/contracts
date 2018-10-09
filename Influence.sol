@@ -17,18 +17,25 @@ contract Influence is Manageable {
         uint8 typeId;
         uint8 level;
         uint16 regionId;
+        int64 influence;
         address owner;
-        int256 influence;
         uint256 types;//Building types in 5 cell radius (8 bit for each type)
     }
 
     uint256 lastTotalInfluenceChange;
 
+    uint256 lastTotalBankUpdate;
+
     mapping(uint256 => int256) public totalInfluence; // period => influence
+
     mapping(uint16 => mapping(uint256 => int256)) public regionsInfluence;// regionId => period => influence
     mapping(uint16 => uint256) public lastRegionInfluenceChange; //regionId => period
+
     mapping(address => mapping(uint16 => mapping(uint256 => int256))) public userRegionInfluence; // user => regionId => period => influence
     mapping(address => mapping(uint16 => uint256)) public lastUserRegionInfluenceChange; // user => regionId => period
+
+    mapping(address => mapping(uint256 => int256)) public userGlobalInfluence;
+    mapping(address  => uint256) public lastGlobalUserInfluenceChange; // user => period
 
     mapping(uint256 => int256) public globalShareBank; // period => ether
     mapping(uint16 => mapping(uint256 => int256)) public regionShareBank; // region => period => ether
@@ -36,13 +43,12 @@ contract Influence is Manageable {
 
     mapping(address => uint256) public lastConversion; // user => conversion period
 
-    mapping(int256 => mapping(int256 => MapCell)) public influenceMap; // x => y => cell
+    mapping(int64 => mapping(int64 => MapCell)) public influenceMap; // x => y => cell
 
     mapping(uint8 => InfluenceSideEffect[]) public influenceSideEffect;//buildingTypeId => side effect [max 10]
-    mapping(uint8 => mapping(uint8 => int256)) public multipliers; //building type => level => influence
-    mapping(uint8 => int256) public baseInfluences; //building type => level => influence
+    mapping(uint8 => mapping(uint8 => uint8)) public multipliers; //building type => level => influence
+    mapping(uint8 => int64) public baseInfluences; //building type => level => influence
     mapping(uint8 => mapping(uint8 => bool)) public isAffected;
-
 
     uint32 public period; // period size, default 1 day
     uint256 public initialPeriod; // period when game starts
@@ -52,16 +58,15 @@ contract Influence is Manageable {
 
     int256 public totalShare;
 
+    uint8 RESOURCES_TYPE_ID = 2;
+
     constructor(uint32 _period) public {
         period = _period > 0 ? _period : 1 days;
         initialPeriod = now / period;
     }
 
     function init() public  {
-        initialPeriod = currentPeriod();
-        totalShare = 36 ether;
-        globalShareBank[initialPeriod] = totalShare * sharePercent / 100;
-        totalShare = totalShare - globalShareBank[initialPeriod];
+        initialPeriod = _currentPeriod();
     }
 
 
@@ -79,12 +84,12 @@ contract Influence is Manageable {
     }
 
     function addRegionShareBank(int256 value, uint16 regionId) external onlyManager {
-        uint256 cp = currentPeriod();
+        uint256 cp = _currentPeriod();
         regionShareBank[regionId][cp] = regionShareBank[regionId][cp] + value;
     }
 
     function addGlobalShareBank(int256 value) external onlyManager {
-        uint256 cp = currentPeriod();
+        uint256 cp = _currentPeriod();
         periodsIncome[cp] = periodsIncome[cp] + value;
 
         _updateGlobalShareBank();
@@ -96,25 +101,25 @@ contract Influence is Manageable {
 
 
     function _updateGlobalShareBank() internal {
-        uint256 cp = currentPeriod();
+        uint256 cp = _currentPeriod();
 
-        if(globalShareBank[cp - 1] == 0) {
-            int256 share = totalShare;
-
-            for(uint256 i = cp - 2; i >= initialPeriod; i--) {
-                if(globalShareBank[i] != 0) {
-                    for(uint256 j = i; j < cp; j++) {
-                        share = share + periodsIncome[j];
-                        globalShareBank[j] = share * sharePercent / 100;
-                        share = share - globalShareBank[j];
-                    }
-                    break;
-                }
-            }
-
-            totalShare = share;
+        if(lastTotalBankUpdate >= cp - 1 || cp == initialPeriod) {
+            return;
         }
 
+        uint256 fromPeriod = lastTotalBankUpdate == 0 ? initialPeriod : (lastTotalBankUpdate + 1);
+
+        int256 share = totalShare;
+
+        for(uint256 j = fromPeriod; j < cp; j++) {
+            share = share + periodsIncome[j];
+            globalShareBank[j] = share * sharePercent / 100;
+            share = share - globalShareBank[j];
+        }
+
+        totalShare = share;
+
+        lastTotalBankUpdate = cp - 1;
     }
 
     function addSideEffects(
@@ -137,14 +142,14 @@ contract Influence is Manageable {
         }
     }
 
-    function setType(int256 x, int256 y, uint8 typeId, uint16 regionId, uint8 level, address owner) external onlyManager {
+    function setType(int64 x, int64 y, uint8 typeId, uint16 regionId, uint8 level, address owner) external onlyManager {
         influenceMap[x][y].typeId = typeId;
         influenceMap[x][y].regionId = regionId;
         influenceMap[x][y].owner = owner;
         influenceMap[x][y].level = level;
     }
 
-    function setTypeAndUpdate(int256 x, int256 y, uint8 typeId, uint16 regionId, uint8 level, address owner) external onlyManager {
+    function setTypeAndUpdate(int64 x, int64 y, uint8 typeId, uint16 regionId, uint8 level, address owner) external onlyManager {
         influenceMap[x][y].typeId = typeId;
         influenceMap[x][y].regionId = regionId;
         influenceMap[x][y].owner = owner;
@@ -153,86 +158,85 @@ contract Influence is Manageable {
     }
 
 
-    function setLevel(int256 x, int256 y, uint8 level) external onlyManager {
+    function setLevel(int64 x, int64 y, uint8 level) external onlyManager {
         influenceMap[x][y].level = level;
     }
 
-    function setLevelAndUpdate(int256 x, int256 y, uint8 level) external onlyManager {
+    function setLevelAndUpdate(int64 x, int64 y, uint8 level) external onlyManager {
         influenceMap[x][y].level = level;
         _updateCellInfluenceCallable(x, y);
     }
 
-    function markForDemolition(int256 x, int256 y) external onlyManager {
+    function markForDemolition(int64 x, int64 y) external onlyManager {
         influenceMap[x][y].level = 0;
     }
 
-    function markForDemolitionAndUpdate(int256 x, int256 y) external onlyManager {
+    function markForDemolitionAndUpdate(int64 x, int64 y) external onlyManager {
         influenceMap[x][y].level = 0;
         _updateCellInfluenceCallable(x, y);
     }
 
-    function setBaseInfluenceAndMultiplier(uint8 _buildingType, int256 _influence, int256[7] _multipliers) external onlyManager {
+    function setBaseInfluenceAndMultiplier(uint8 _buildingType, int64 _influence, uint8[7] _multipliers) external onlyManager {
         baseInfluences[_buildingType] = _influence;
         for(uint8 i = 1; i <= 7; i++) {
             multipliers[_buildingType][i] = _multipliers[i - 1];
         }
     }
 
-    function moveToken(int256 x, int256 y, uint16 regionId, address from, address to) external onlyManager {
+    function moveToken(int64 x, int64 y, uint16 regionId, address from, address to) external onlyManager {
         if(influenceMap[x][y].influence == 0 || lastUserRegionInfluenceChange[from][regionId] == 0) {
             return;
         }
 
-        uint256 cp = currentPeriod();
+        _updateUserRegionInfluence(from, regionId, -influenceMap[x][y].influence);
 
-        int256 lastValue = userRegionInfluence[from][regionId][lastUserRegionInfluenceChange[from][regionId]];
-        if(lastValue == -1) {
-            lastValue = 0;
-        }
-
-        userRegionInfluence[from][regionId][cp] = lastValue <= influenceMap[x][y].influence
-            ? int(-1)
-            : lastValue - influenceMap[x][y].influence ;
-
-        lastUserRegionInfluenceChange[from][regionId] = cp;
+        _updateGlobalUserInfluence(from, -influenceMap[x][y].influence);
 
         if(to == address(0)) {
-            totalInfluence[cp] = totalInfluence[lastTotalInfluenceChange] - influenceMap[x][y].influence;
-            if(totalInfluence[cp] == 0) {
-                totalInfluence[cp] = -1;
-            }
-
-            if(lastTotalInfluenceChange != cp) {
-                lastTotalInfluenceChange = cp;
-            }
-
-            regionsInfluence[regionId][cp] = regionsInfluence[regionId][cp] - influenceMap[x][y].influence;
-
-            if(regionsInfluence[regionId][cp] == 0) {
-                regionsInfluence[regionId][cp] = -1;
-            }
-
-            if(lastRegionInfluenceChange[regionId] != cp) {
-                lastRegionInfluenceChange[regionId] = cp;
-            }
+            _updateTotalInfluence(-influenceMap[x][y].influence);
+            _updateRegionInfluence(regionId, -influenceMap[x][y].influence);
 
             return;
         }
 
-        lastValue = 0;
-        if(lastUserRegionInfluenceChange[to][regionId] > 0) {
-            lastValue = userRegionInfluence[to][regionId][lastUserRegionInfluenceChange[to][regionId]];
-            lastValue = lastValue < 0 ? 0 : lastValue;
-        }
-
-        userRegionInfluence[to][regionId][cp] = lastValue - influenceMap[x][y].influence;
-
-        lastUserRegionInfluenceChange[to][regionId] = cp;
-
+        _updateUserRegionInfluence(to, regionId, influenceMap[x][y].influence);
+        _updateGlobalUserInfluence(to, influenceMap[x][y].influence);
     }
 
-    function _updateUserRegionInfluence(address user, uint16 regionId, int256 diff) internal {
-        uint256 cp = currentPeriod();
+    function _getLastGlobalUserInfluence(address user, uint256 fromPeriod) internal view returns (int256) {
+        if(lastGlobalUserInfluenceChange[user] == 0) {
+            return -1;
+        }
+
+        for(uint256 i = fromPeriod; i >= initialPeriod; i--) {
+            if(userGlobalInfluence[user][i] != 0) {
+                return userGlobalInfluence[user][i];
+            }
+        }
+
+        return -1;
+    }
+
+    function _getLastGlobalUserInfluence(address user) internal view returns (int256) {
+        if(lastGlobalUserInfluenceChange[user] == 0) {
+            return -1;
+        }
+
+        return userGlobalInfluence[user][lastGlobalUserInfluenceChange[user]];
+    }
+
+
+    function _updateGlobalUserInfluence(address user, int64 diff) internal {
+        int256 lastValue = _getLastGlobalUserInfluence(user);
+        uint256 cp = _currentPeriod();
+        lastValue = lastValue < 0 ? 0 : lastValue;
+
+        userGlobalInfluence[user][cp] = (lastValue + diff) <= 0 ? -1 : (lastValue + diff);
+        lastGlobalUserInfluenceChange[user] = cp;
+    }
+
+    function _updateUserRegionInfluence(address user, uint16 regionId, int64 diff) internal {
+        uint256 cp = _currentPeriod();
         if(lastUserRegionInfluenceChange[user][regionId] > 0) {
             userRegionInfluence[user][regionId][cp] = userRegionInfluence[user][regionId][lastUserRegionInfluenceChange[user][regionId]] + diff;
         } else {
@@ -245,8 +249,8 @@ contract Influence is Manageable {
 
     }
 
-    function _updateRegionInfluence(uint16 regionId, int256 diff) internal {
-        uint256 cp = currentPeriod();
+    function _updateRegionInfluence(uint16 regionId, int64 diff) internal {
+        uint256 cp = _currentPeriod();
         if(lastRegionInfluenceChange[regionId] > 0) {
             regionsInfluence[regionId][cp] = regionsInfluence[regionId][lastRegionInfluenceChange[regionId]] + diff;
         } else {
@@ -258,8 +262,8 @@ contract Influence is Manageable {
         lastRegionInfluenceChange[regionId] = cp;
     }
 
-    function _updateTotalInfluence(int256 diff) internal {
-        uint256 cp = currentPeriod();
+    function _updateTotalInfluence(int64 diff) internal {
+        uint256 cp = _currentPeriod();
         if(lastTotalInfluenceChange > 0) {
             totalInfluence[cp] = totalInfluence[lastTotalInfluenceChange] + diff;
         } else {
@@ -274,7 +278,7 @@ contract Influence is Manageable {
 
 
     function convertToBalanceValue(address user, uint16[] regionIds) external onlyManager returns (int256) {
-        uint256 cp = currentPeriod();
+        uint256 cp = _currentPeriod();
         _updateGlobalShareBank();
 
         int256 value = getBalanceValue(user, cp - 1, regionIds);
@@ -283,19 +287,19 @@ contract Influence is Manageable {
         return value;
     }
 
-    function getLastUserRegionInfluenceValue(uint16 regionId, address user, uint256 fromPeriod) internal view returns (int256){
+    function _getLastUserRegionInfluenceValue(uint16 regionId, address user, uint256 fromPeriod) internal view returns (int256){
         for(uint256 i = fromPeriod; i >= initialPeriod; i--) {
             if(userRegionInfluence[user][regionId][i] == 0) {
                 continue;
             }
 
-            return userRegionInfluence[user][regionId][i] == -1 ? 0 : userRegionInfluence[user][regionId][i];
+            return userRegionInfluence[user][regionId][i] < 0 ? 0 : userRegionInfluence[user][regionId][i];
         }
 
         return 0;
     }
 
-    function getLastTotalInfluenceValue(uint256 fromPeriod) internal view returns (int256){
+    function _getLastTotalInfluenceValue(uint256 fromPeriod) internal view returns (int256){
         for(uint256 i = fromPeriod; i >= initialPeriod; i--) {
             if(totalInfluence[i] != 0) {
                 return totalInfluence[i];
@@ -305,20 +309,20 @@ contract Influence is Manageable {
         return 0;
     }
 
-    function getRegionLastInfluenceValue(uint16 regionId, uint256 fromPeriod) internal view returns (int256) {
+    function _getRegionLastInfluenceValue(uint16 regionId, uint256 fromPeriod) internal view returns (int256) {
         for(uint256 i = fromPeriod; i >= initialPeriod; i--) {
             if(regionsInfluence[regionId][i] == 0) {
                 continue;
             }
 
-            return regionsInfluence[regionId][i] == -1 ? 0 : regionsInfluence[regionId][i];
+            return regionsInfluence[regionId][i] < 0 ? 0 : regionsInfluence[regionId][i];
         }
 
         return 0;
     }
 
     function getCurrentBalanceValue(address user, uint16[] memory regionIds) public view returns (int256) {
-        return getBalanceValue(user, currentPeriod() - 1, regionIds);
+        return getBalanceValue(user, _currentPeriod() - 1, regionIds);
     }
 
 //TODO: optimize
@@ -327,38 +331,31 @@ contract Influence is Manageable {
             return 0;
         }
 
-        int256 tInf = getLastTotalInfluenceValue(lastConversion[user] == 0 ? initialPeriod : lastConversion[user]);
-        int256[] memory regionUserInfluenceData = new int256[](regionIds.length);
-        int256[] memory regionInfluenceData = new int256[](regionIds.length);
-        for(uint256 i = 0; i < regionIds.length; i++) {
-             regionUserInfluenceData[i] = getLastUserRegionInfluenceValue(regionIds[i], user, lastConversion[user] == 0 ? initialPeriod : lastConversion[user]);
-             regionInfluenceData[i] = getRegionLastInfluenceValue(regionIds[i], lastConversion[user] == 0 ? initialPeriod : lastConversion[user]);
-        }
+        int256 tInf = _getLastTotalInfluenceValue(lastConversion[user] == 0 ? initialPeriod : lastConversion[user]);
 
         int256 totalUserBalanceValue = 0;
 
-        for(i = lastConversion[user] == 0 ? initialPeriod : lastConversion[user]; i <= toPeriod; i++) {
+        for(uint256 i = lastConversion[user] == 0 ? initialPeriod : (lastConversion[user] + 1); i <= toPeriod; i++) {
             tInf = totalInfluence[i] == 0
                 ? tInf
-                : (totalInfluence[i] == -1 ? 0 : totalInfluence[i]);
-            int256 totalUserInfluence = 0;
+                : (totalInfluence[i] < 0 ? 0 : totalInfluence[i]);
+
+            int256 totalUserInfluence = _getLastGlobalUserInfluence(user, i);
+            totalUserInfluence = totalUserInfluence < 0 ? 0 : totalUserInfluence;
+
             for(uint256 j = 0; j < regionIds.length; j++) {
-                regionUserInfluenceData[j] = userRegionInfluence[user][regionIds[j]][i] == 0
-                    ? regionUserInfluenceData[j]
-                    : (userRegionInfluence[user][regionIds[j]][i] == -1 ? 0 : userRegionInfluence[user][regionIds[j]][i]);
+                int256 _userRegionInfluence = _getLastUserRegionInfluenceValue(regionIds[j], user, i);
+                int256 _regionInfluence = _getRegionLastInfluenceValue(regionIds[j], i);
+                _userRegionInfluence = _userRegionInfluence < 0 ? 0 : _userRegionInfluence;
+                _regionInfluence = _regionInfluence < 0 ? 0 : _regionInfluence;
 
-                regionInfluenceData[j] = regionsInfluence[regionIds[j]][i] == 0
-                    ? regionInfluenceData[j]
-                    : (regionsInfluence[regionIds[j]][i] == -1 ? 0 : regionsInfluence[regionIds[j]][i]);
-
-                totalUserInfluence = totalUserInfluence + regionUserInfluenceData[j];
-                if(regionInfluenceData[j] > 0 && regionShareBank[regionIds[j]][i] > 0) {
-                    totalUserBalanceValue = totalUserBalanceValue + regionShareBank[regionIds[j]][i] * regionUserInfluenceData[j] / regionInfluenceData[j];
+                if(_regionInfluence > 0 && regionShareBank[regionIds[j]][i] > 0) {
+                    totalUserBalanceValue = totalUserBalanceValue + regionShareBank[regionIds[j]][i] * _userRegionInfluence / _regionInfluence;
                 }
             }
-
-            if(tInf > 0 && globalShareBank[i] > 0) {
-                totalUserBalanceValue = totalUserBalanceValue + globalShareBank[i] * totalUserInfluence / tInf;
+            int256 gs = _getGlobalShareBank(i);
+            if(tInf > 0 && gs > 0) {
+                totalUserBalanceValue = totalUserBalanceValue + gs * totalUserInfluence / tInf;
             }
 
         }
@@ -366,13 +363,13 @@ contract Influence is Manageable {
         return totalUserBalanceValue;
     }
 
-    function updateCellInfluence(int256 x, int256 y) external onlyManager {
+    function updateCellInfluence(int64 x, int64 y) external onlyManager {
         _updateCellInfluenceCallable(x, y);
     }
 
 
-    function _updateCellInfluenceCallable(int256 x, int256 y) internal {
-        int256 diff;
+    function _updateCellInfluenceCallable(int64 x, int64 y) internal {
+        int64 diff;
         if(influenceMap[x][y].level == 0) {
             if(influenceMap[x][y].influence > 0) {
 
@@ -389,16 +386,19 @@ contract Influence is Manageable {
                     diff
                 );
 
+                _updateGlobalUserInfluence(influenceMap[x][y].owner, diff);
+
                 influenceMap[x][y].influence = 0;
             }
 
             _updateTotalInfluence(_updateInfluenceNearCell(x, y, influenceMap[x][y].typeId, true));
+
             influenceMap[x][y].typeId = 0;
         } else {
             diff = _updateCellInfluence(x, y);
 
 
-            if(influenceMap[x][y].level == 1) {
+            if(influenceMap[x][y].level == 1 || (influenceMap[x][y].typeId == RESOURCES_TYPE_ID && influenceMap[x][y].influence == 0)) {
                 diff = diff  + _updateInfluenceNearCell(x, y, influenceMap[x][y].typeId, false);
             }
         }
@@ -407,57 +407,77 @@ contract Influence is Manageable {
 
     }
 
+    function setPoints(int64[] x, int64[] y) public onlyManager {
+        for(uint256 i = 0; i < x.length; i++) {
+            influenceMap[x[i]][y[i]] = MapCell({
+                typeId: 0,
+                level: 0,
+                regionId: 0,
+                influence: 0,
+                owner: 0,
+                types: 0
+            });
+        }
+    }
 
 
-    function _updateCellInfluence(int256 x, int256 y) internal returns (int256) {
+
+    function _updateCellInfluence(int64 x, int64 y) internal returns (int64) {
         return _updateCellInfluence(x, y, 0, false);
     }
 
-    function _updateCellInfluence(int256 x, int256 y, uint8 typeId, bool demolition) internal returns (int256)  {
+    function _updateCellInfluence(int64 x, int64 y, uint8 typeId, bool demolition) internal returns (int64)  {
         if(influenceMap[x][y].level == 0 || (typeId > 0 && !isAffected[influenceMap[x][y].typeId][typeId])) {
             return 0;
         }
 
-        int256 lastInfluence = influenceMap[x][y].influence < 0 ? 0 : influenceMap[x][y].influence;
+        MapCell storage cell = influenceMap[x][y];
+        int64 lastInfluence = cell.influence < 0 ? 0 : cell.influence;
 
-        int256 total = baseInfluences[influenceMap[x][y].typeId];
-        if(influenceMap[x][y].level == 1 && typeId == 0) {
-            influenceMap[x][y].types = _getTypes(x, y);
+        int64 total = multipliers[cell.typeId][cell.level] * baseInfluences[cell.typeId];
+        if((cell.level == 1 || cell.typeId == RESOURCES_TYPE_ID) && typeId == 0) {
+            cell.types = _getTypes(x, y);
         }
 
         if(typeId > 0) {
-            influenceMap[x][y].types = demolition ? getDecType(typeId, influenceMap[x][y].types) : getIncType(typeId, influenceMap[x][y].types);
-        }
+            cell.types = demolition ? _getDecType(typeId, cell.types) : _getIncType(typeId, cell.types);
 
-        InfluenceSideEffect[] storage sideEffects = influenceSideEffect[influenceMap[x][y].typeId];
-
-        for(uint256 i = 0; i < sideEffects.length; i++) {
-            if( getType(sideEffects[i].typeId, influenceMap[x][y].types) > 0) {
-                total = total + getSideEffectValue(influenceMap[x][y].types, sideEffects[i]);
+            if(_getType(typeId, cell.types) > 20) {
+                return 0;
             }
         }
 
-        total = total <= 0 ? -1 : (total * multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level]);
+        InfluenceSideEffect[] storage sideEffects = influenceSideEffect[cell.typeId];
 
-        influenceMap[x][y].influence = total;
+        for(uint256 i = 0; i < sideEffects.length; i++) {
+            if( _getType(sideEffects[i].typeId, cell.types) > 0) {
+                total = total + _getSideEffectValue(cell.types, sideEffects[i], multipliers[cell.typeId][cell.level], cell.level);
+            }
+        }
 
-        int256 diff = (influenceMap[x][y].influence == -1 ? 0 : influenceMap[x][y].influence) - lastInfluence;
+        total = total <= 0 ? -1 : total;
 
-        if(influenceMap[x][y].influence != lastInfluence) {
-            _updateUserRegionInfluence(influenceMap[x][y].owner, influenceMap[x][y].regionId, diff);
-            _updateRegionInfluence(influenceMap[x][y].regionId, diff);
+        cell.influence = total;
+
+        int64 diff = (cell.influence < 0 ? 0 : cell.influence) - lastInfluence;
+
+        if(cell.influence != lastInfluence) {
+            _updateUserRegionInfluence(cell.owner, cell.regionId, diff);
+            _updateRegionInfluence(cell.regionId, diff);
+            _updateGlobalUserInfluence(cell.owner, diff);
         }
 
         return diff;
     }
 
-    function getSideEffectValue(uint256 types, InfluenceSideEffect sideEffect) internal pure returns (int256) {
-        uint8 typeCount = getType(sideEffect.typeId, types);
+    function _getSideEffectValue(uint256 types, InfluenceSideEffect sideEffect, uint8 multiplier, uint8 level) internal pure returns (int64) {
+        uint8 typeCount = _getType(sideEffect.typeId, types);
+        int8 negativeDivider = (level <= 5 ? int8(1) : (level == 6 ? int8(2) : int8(4)));
         if(sideEffect.startFrom == 0) {
-            return sideEffect.value * (sideEffect.penalty ? -1 : int8(1))
+            return (multiplier * sideEffect.value * (sideEffect.penalty ? -1 : int8(1))
                 * (sideEffect.numberAffects < typeCount
                     ? sideEffect.numberAffects
-                    : typeCount);
+                    : typeCount)) / (sideEffect.penalty ? negativeDivider : int8(1)) ;
         }
 
         return sideEffect.value * (sideEffect.penalty ? -1 : int8(1))
@@ -467,29 +487,31 @@ contract Influence is Manageable {
                         ? sideEffect.numberAffects
                         : typeCount - sideEffect.startFrom
                 ) : 0
-            );
+            ) / (sideEffect.penalty ? negativeDivider : int8(1));
     }
 
-    function _getTypes(int256 x, int256 y) internal view returns (uint256 types) {
-        for(int256 xi = x-5; xi <= x+5; xi++) {
-            for(int256 yi = y-5; yi <= y+5; yi++) {
+    function _getTypes(int64 x, int64 y) internal view returns (uint256 types) {
+        for(int64 xi = x-5; xi <= x+5; xi++) {
+            for(int64 yi = y-5; yi <= y+5; yi++) {
                 if((xi == x && yi == y)) {
                     continue;
                 }
                 if(influenceMap[xi][yi].typeId > 0) {
-                    types = getIncType(influenceMap[xi][yi].typeId, types);
+                    if(influenceMap[xi][yi].typeId == RESOURCES_TYPE_ID) {
+                        types = _getAddType(influenceMap[xi][yi].typeId, types, influenceMap[xi][yi].level);
+
+                    } else {
+                        types = _getIncType(influenceMap[xi][yi].typeId, types);
+                    }
                 }
             }
         }
     }
 
-    function _updateInfluenceNearCell(int256 x, int256 y, uint8 typeId) internal returns (int256) {
-        return _updateInfluenceNearCell(x, y, typeId, false);
-    }
+    function _updateInfluenceNearCell(int64 x, int64 y, uint8 typeId, bool demolition) internal returns (int64 diff) {
 
-    function _updateInfluenceNearCell(int256 x, int256 y, uint8 typeId, bool demolition) internal returns (int256 diff) {
-        for(int256 xi = x-5; xi <= x+5; xi++) {
-            for(int256 yi = y-5; yi <= y+5; yi++) {
+        for(int64 xi = x-5; xi <= x+5; xi++) {
+            for(int64 yi = y-5; yi <= y+5; yi++) {
                 if(xi == x && yi == y) {
                     continue;
                 }
@@ -507,21 +529,25 @@ contract Influence is Manageable {
         return currentTypes & ~_shiftLeft(0xFF, _getTypeShift(typeId));
     }
 
-    function getUpdatedTypes(uint8 typeId, uint8 value, uint256 currentTypes) pure internal returns (uint256) {
+    function _getUpdatedTypes(uint8 typeId, uint8 value, uint256 currentTypes) pure internal returns (uint256) {
         return _clearType(typeId, currentTypes) | _shiftLeft(value, _getTypeShift(typeId));
     }
 
-    function getIncType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
-        return _shiftLeft((getType(typeId, currentTypes) + 1),  _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
+    function _getAddType(uint8 typeId, uint256 currentTypes, uint8 count) pure internal returns (uint256) {
+        return _shiftLeft((_getType(typeId, currentTypes) + count),  _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
     }
 
-    function getType(uint8 typeId, uint256 currentTypes) pure internal returns (uint8) {
+    function _getIncType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
+        return _shiftLeft((_getType(typeId, currentTypes) + 1),  _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
+    }
+
+    function _getType(uint8 typeId, uint256 currentTypes) pure internal returns (uint8) {
         uint256 shift = _getTypeShift(typeId);
         return uint8(_shiftRight(currentTypes & _shiftLeft(0xFF, shift), shift));
     }
 
-    function getDecType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
-        return _shiftLeft((getType(typeId, currentTypes) - 1), _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
+    function _getDecType(uint8 typeId, uint256 currentTypes) pure internal returns (uint256) {
+        return _shiftLeft((_getType(typeId, currentTypes) - 1), _getTypeShift(typeId)) | _clearType(typeId, currentTypes);
     }
 
     function _shiftLeft(uint value, uint shift) pure internal returns (uint256) {
@@ -532,43 +558,144 @@ contract Influence is Manageable {
         return value / (2 ** shift);
     }
 
-    function currentPeriod() internal view returns(uint256) {
+    function _currentPeriod() internal view returns(uint256) {
         return now / period;
     }
 
     function getCurrentPeriod() public view returns(uint256) {
-        return currentPeriod();
+        return _currentPeriod();
     }
 
-    function getCellInfluence(int256 x, int256 y) public view returns (int256) {
+    function getCellInfluence(int64 x, int64 y) public view returns (int256) {
         return influenceMap[x][y].influence;
     }
 
     function getCurrentInfluence(address user, uint16[] memory regionIds) public view returns (int256 _userInfluence, int256 _totalInfluence) {
         for(uint256 i = 0; i < regionIds.length; i++) {
-            _userInfluence = _userInfluence + getLastUserRegionInfluenceValue(regionIds[i], user, currentPeriod());
+            _userInfluence = _userInfluence + _getLastUserRegionInfluenceValue(regionIds[i], user, _currentPeriod());
         }
-        _totalInfluence = getLastTotalInfluenceValue(currentPeriod());
+        _totalInfluence = _getLastTotalInfluenceValue(_currentPeriod());
     }
 
-    function getTypesNear(int256 x, int256 y) public view returns (uint8[8] types) {
+
+    function getTypesNear(int64 x, int64 y) public view returns (uint8[8] types) {
         for(uint8 i = 0; i < 8; i++) {
-            types[i] = getType(i + 1, influenceMap[x][y].types);
+            types[i] = _getType(i + 1, influenceMap[x][y].types);
         }
     }
 
-    function getBaseInfluenceAfterUpgrade(int256 x, int256 y) public view returns (int256 currentBaseInfluence, int256 upgradedInfluence) {
-        return (baseInfluences[influenceMap[x][y].typeId] * multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level], baseInfluences[influenceMap[x][y].typeId] * multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level + 1]);
+    function getBaseInfluenceAfterUpgrade(int64 x, int64 y) public view returns (int256 currentBaseInfluence, int256 upgradedInfluence) {
+        return (baseInfluences[influenceMap[x][y].typeId] * int16(multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level]), baseInfluences[influenceMap[x][y].typeId] * int16(multipliers[influenceMap[x][y].typeId][influenceMap[x][y].level + 1]));
     }
 
     function getLastShareBankValues(uint16[] memory regionIds) public view returns (int256 globalShareBankSum, int256 regionShareBankSum) {
-        uint256 cp = currentPeriod();
+        uint256 cp = _currentPeriod();
 
-        globalShareBankSum = globalShareBank[cp - 1];
+        globalShareBankSum = getTodayGlobalShareBank();
 
         regionShareBankSum = 0;
         for(uint256 i = 0; i < regionIds.length; i++) {
             regionShareBankSum = regionShareBankSum + regionShareBank[regionIds[i]][cp];
         }
+    }
+
+    function getTodayGlobalShareBank() public view returns (int256){
+        return _getGlobalShareBank(_currentPeriod());
+    }
+
+    function _getGlobalShareBank(uint256 fromPeriod) internal view returns (int256) {
+        if(fromPeriod <= lastTotalBankUpdate) {
+            return globalShareBank[fromPeriod];
+        }
+        int256 share = totalShare;
+
+        for(uint256 j = lastTotalBankUpdate == 0 ? initialPeriod : lastTotalBankUpdate + 1; j < fromPeriod; j++) {
+            share = (share + periodsIncome[j]) * (100 - sharePercent) / 100;
+        }
+
+        return (share + periodsIncome[fromPeriod]) * sharePercent / 100;
+    }
+
+    function getLeftGlobalBank() public view returns (int256) {
+        uint256 fromPeriod = _currentPeriod();
+
+        int256 share = totalShare;
+
+        for(uint256 j = lastTotalBankUpdate == 0 ? initialPeriod : lastTotalBankUpdate + 1; j < fromPeriod; j++) {
+            share = share + periodsIncome[j];
+            share = share * (100 - sharePercent) / 100;
+        }
+
+        return share + periodsIncome[fromPeriod];
+    }
+
+    function getInfluenceForBuilding(int64 x, int64 y, uint8 buildingType) public view returns (int256) {
+        if(buildingType == 0) {
+            return influenceMap[x][y].influence;
+        } else if(buildingType == 1) {
+            return influenceMap[x][y].influence + influenceMap[x][y - 1].influence;
+        } else if (buildingType == 2) {
+            return influenceMap[x][y].influence + influenceMap[x - 1][y].influence;
+        } else if (buildingType == 3) {
+            return influenceMap[x][y].influence + influenceMap[x - 1][y].influence + influenceMap[x][y - 1].influence + influenceMap[x - 1][y - 1].influence;
+        }
+    }
+
+    function getAffectsAndInfluenceHuge(int64 x, int64 y, uint8 buildingType) public view returns (
+        int256 cellInfluence, uint16[8][2] counts, int256[8][2] bonus, int256[8][2] penalty
+    ) {
+        (counts[0], bonus[0], penalty[0]) = getAffects(x, y);
+        if(buildingType == 1) {
+            cellInfluence = influenceMap[x][y].influence + influenceMap[x - 1][y].influence;
+            (counts[1], bonus[1], penalty[1]) = getAffects(x - 1, y);
+        } else {
+            cellInfluence = influenceMap[x][y].influence + influenceMap[x][y - 1].influence ;
+            (counts[1], bonus[1], penalty[1]) = getAffects(x, y - 1);
+        }
+    }
+
+    function getAffectsAndInfluenceMega(int64 x, int64 y) public view returns (
+        int256 cellInfluence, uint16[8][4] counts, int256[8][4] bonus, int256[8][4] penalty
+    ) {
+        cellInfluence = influenceMap[x][y].influence + influenceMap[x - 1][y].influence + influenceMap[x][y - 1].influence + influenceMap[x - 1][y - 1].influence;
+        (counts[0], bonus[0], penalty[0]) = getAffects(x, y);
+        (counts[1], bonus[1], penalty[1]) = getAffects(x - 1, y);
+        (counts[2], bonus[2], penalty[2]) = getAffects(x, y - 1);
+        (counts[3], bonus[3], penalty[3]) = getAffects(x - 1, y - 1);
+    }
+
+    function getAffects(int64 x, int64 y) public view returns (uint16[8] count, int256[8] bonus, int256[8] penalty) {
+        if(influenceMap[x][y].typeId == 0) {
+            return;
+        }
+
+        uint8[8] memory types = getTypesNear(x, y);
+        MapCell storage cell = influenceMap[x][y];
+
+        for(uint8 i = 0; i < 8; i++) {
+            count[i] = uint16(types[i]);
+        }
+
+        InfluenceSideEffect[] storage sideEffects = influenceSideEffect[cell.typeId];
+
+        for(i = 0; i < sideEffects.length; i++) {
+            int64 diff = _getSideEffectValue(influenceMap[x][y].types, sideEffects[i], multipliers[cell.typeId][cell.level], cell.level);
+            if(diff >= 0) {
+                bonus[sideEffects[i].typeId - 1] = bonus[sideEffects[i].typeId - 1] + diff;
+            } else {
+                penalty[sideEffects[i].typeId - 1] = penalty[sideEffects[i].typeId - 1] + diff;
+            }
+        }
+    }
+
+    function getTotalAndRegionData(uint16 regionId, uint256 fromPeriod, address user)  public view returns (
+        int256 totalInf, int256 regionInf, int256 userRegion, int256 userTotal, int256 regionBank, int256 globalBank
+    ) {
+        regionBank = regionShareBank[regionId][fromPeriod];
+        globalBank = _getGlobalShareBank(fromPeriod);
+        totalInf = _getLastTotalInfluenceValue(fromPeriod);
+        userTotal = _getLastGlobalUserInfluence(user, fromPeriod);
+        userRegion = _getLastUserRegionInfluenceValue(regionId, user, fromPeriod);
+        regionInf = _getRegionLastInfluenceValue(regionId, fromPeriod);
     }
 }
