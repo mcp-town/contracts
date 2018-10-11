@@ -222,16 +222,6 @@ contract Main is Manageable, MainInterface {
         regionFee = (baseBuildingPrice  *  regionTax) / 200;
     }
 
-    function getUpgradePrice(int64 x, int64 y) public view returns (uint256) {
-        (uint16 buildingId, uint8 buildingLevel) = landContract.getBuilding(x, y);
-
-        uint256 regionTax = regionContract.getTax(landContract.getRegion(x, y));
-
-        uint256 baseBuildingPrice = buildingPrices[buildings[buildingId]][buildingLevel];
-
-        return baseBuildingPrice  + (baseBuildingPrice  *  regionTax) / 200;
-    }
-
     function getBuildPrices(uint16 regionId) public view returns (uint256[9][9] prices) {
 
         uint256 regionTax = regionContract.getTax(regionId);
@@ -464,8 +454,20 @@ contract Main is Manageable, MainInterface {
 
     function transferCallback(int64 x, int64 y, uint16 regionId, address from, address to) external {
         require(msg.sender == address(landContract));
-
+        (,,uint256 tokenId,) = landContract.map(x, y);
+        (,uint8 tokenType,,,,,,) = landContract.tokens(tokenId);
         influenceContract.moveToken(x, y, regionId, from, to);
+        if(tokenType == 1) {
+            influenceContract.moveToken(x - 1, y, regionId, from, to);
+
+        } else if(tokenType == 2) {
+            influenceContract.moveToken(x, y - 1, regionId, from, to);
+
+        } else if(tokenType == 3) {
+            influenceContract.moveToken(x - 1, y, regionId, from, to);
+            influenceContract.moveToken(x, y - 1, regionId, from, to);
+            influenceContract.moveToken(x - 1, y - 1, regionId, from, to);
+        }
     }
 
     function () public payable {
